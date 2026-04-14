@@ -125,6 +125,27 @@ FONT      = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SM   = 0.40
 FONT_MD   = 0.50
 
+# Zóny těla pro částečný mesh (name, y_rel_start, y_rel_end, x_rel_start, x_rel_end)
+BODY_ZONES = [
+    ("HEAD",        0.00, 0.20, 0.22, 0.78),
+    ("TORSO",       0.20, 0.62, 0.10, 0.90),
+    ("LEFT ARM",    0.20, 0.75, 0.00, 0.28),
+    ("RIGHT ARM",   0.20, 0.75, 0.72, 1.00),
+    ("LEFT LEG",    0.62, 1.00, 0.05, 0.50),
+    ("RIGHT LEG",   0.62, 1.00, 0.50, 0.95),
+]
+ZONE_DURATION = 0.7   # sekund na jednu zónu
+
+SCAN_ACQUIRES = [
+    "ACQUIRE TRANSPORT",
+    "ACQUIRE HUMAN TARGET",
+    "ACQUIRE VEHICLE",
+    "THREAT ANALYSIS",
+    "ENVIRONMENT SCAN",
+    "BIOMETRIC SCAN",
+    "PATTERN MATCH",
+]
+
 
 # ---------------------------------------------------------------------------
 # Obrazové filtry
@@ -197,6 +218,97 @@ def draw_corner_bracket(img, x1, y1, x2, y2, size=14, color=RED_TEXT, thickness=
 
 
 # ---------------------------------------------------------------------------
+# Nové HUD prvky – mřížka, scan panel, zaměřovací kříž
+# ---------------------------------------------------------------------------
+
+def draw_global_grid(img: np.ndarray, tick: float) -> None:
+    """Semitransparentní skenovací mřížka a pohyblivá sweep linka – T2 styl."""
+    h, w = img.shape[:2]
+    layer = np.zeros_like(img)
+    spacing = 30
+    gc = (38, 38, 38)
+    for x in range(0, w + spacing, spacing):
+        cv2.line(layer, (x, 0), (x, h), gc, 1)
+    for y in range(0, h + spacing, spacing):
+        cv2.line(layer, (0, y), (w, y), gc, 1)
+
+    # pohyblivá sweep linka dolů
+    sweep_period = 3.5
+    sweep_y = int((tick % sweep_period) / sweep_period * h)
+    cv2.line(layer, (0, sweep_y), (w, sweep_y), (140, 140, 140), 1)
+    for off in range(1, 12):
+        sy = sweep_y - off
+        if sy >= 0:
+            alpha = int(100 * (1 - off / 12))
+            cv2.line(layer, (0, sy), (w, sy), (alpha, alpha, alpha), 1)
+
+    cv2.add(img, layer, img)
+
+
+def draw_scan_panel(img: np.ndarray, tick: float) -> None:
+    """SCAN MODE datový panel – pravý dolní roh (jako v T2)."""
+    h, w = img.shape[:2]
+
+    scan_num = (int(tick / 2.3) * 137 + 3958) % 99999
+    acq_idx  = int(tick / 4.5) % len(SCAN_ACQUIRES)
+    priority = f"PRIORITY {int(tick * 1237) % 9999999:07d}D"
+
+    rng = random.Random(int(tick / 1.8))
+    data_rows = []
+    for tag in ("VEHI", "MTRC", "TRCT"):
+        a = rng.randint(10000, 99999)
+        b = rng.randint(10000, 99999)
+        c = rng.randint(0, 99)
+        data_rows.append(f"{tag}  {a} {b} {c:02d}")
+
+    lines = [
+        f"SCAN MODE {scan_num:05d}",
+        SCAN_ACQUIRES[acq_idx],
+        priority,
+    ] + data_rows
+
+    line_h  = 13
+    panel_h = len(lines) * line_h + 8
+    panel_w = 196
+    px = w - panel_w - 8
+    py = h - panel_h - 28
+
+    bg = img.copy()
+    cv2.rectangle(bg, (px - 3, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
+    cv2.addWeighted(bg, 0.45, img, 0.55, 0, img)
+
+    for i, line in enumerate(lines):
+        color = RED_TEXT if i < 3 else RED_DIM
+        put_text_outlined(img, line, (px, py + (i + 1) * line_h), 0.33, color)
+
+
+def draw_center_reticle(img: np.ndarray, tick: float) -> None:
+    """Zaměřovací kříž se rotujícím vnějším kruhem ve středu obrazu."""
+    h, w = img.shape[:2]
+    cx, cy = w // 2, h // 2
+    r_inner = 10
+    r_outer = 28
+    col = RED_DIM
+
+    # kříž
+    cv2.line(img, (cx - r_outer, cy), (cx - r_inner, cy), col, 1, cv2.LINE_AA)
+    cv2.line(img, (cx + r_inner, cy), (cx + r_outer, cy), col, 1, cv2.LINE_AA)
+    cv2.line(img, (cx, cy - r_outer), (cx, cy - r_inner), col, 1, cv2.LINE_AA)
+    cv2.line(img, (cx, cy + r_inner), (cx, cy + r_outer), col, 1, cv2.LINE_AA)
+
+    # statický vnitřní kruh
+    cv2.circle(img, (cx, cy), r_inner, col, 1, cv2.LINE_AA)
+
+    # rotující vnější tečky (8 bodů)
+    angle_off = (tick * 25) % 360
+    for i in range(8):
+        a = np.radians(i * 45 + angle_off)
+        x = int(cx + r_outer * 1.45 * np.cos(a))
+        y = int(cy + r_outer * 1.45 * np.sin(a))
+        cv2.circle(img, (x, y), 1, col, -1, cv2.LINE_AA)
+
+
+# ---------------------------------------------------------------------------
 # Segmentační obrys – T2 styl
 # ---------------------------------------------------------------------------
 
@@ -224,6 +336,40 @@ def draw_segmentation_outline(frame: np.ndarray, mask_pts, label: str) -> None:
 def sample_points_in_mask(mask_bin: np.ndarray, n_points: int = 120):
     """Náhodně vzorkuj n_points bodů uvnitř binární masky."""
     ys, xs = np.where(mask_bin > 0)
+    if len(xs) == 0:
+        return []
+    if len(xs) < n_points:
+        return list(zip(xs.tolist(), ys.tolist()))
+    idx = np.random.choice(len(xs), n_points, replace=False)
+    return list(zip(xs[idx].tolist(), ys[idx].tolist()))
+
+
+def get_zone_bbox(det_bbox: tuple, zone: tuple) -> tuple:
+    """Absolutní souřadnice zóny těla z relativních zlomků bboxu."""
+    x1, y1, x2, y2 = det_bbox
+    w = x2 - x1
+    h = y2 - y1
+    _, yr0, yr1, xr0, xr1 = zone
+    return (
+        x1 + int(xr0 * w),
+        y1 + int(yr0 * h),
+        x1 + int(xr1 * w),
+        y1 + int(yr1 * h),
+    )
+
+
+def sample_points_in_zone(mask_bin: np.ndarray, zone_bbox: tuple, n_points: int = 60):
+    """Vzorkuj body uvnitř masky omezené na obdélník zóny."""
+    zx1, zy1, zx2, zy2 = zone_bbox
+    mh, mw = mask_bin.shape[:2]
+    zx1 = max(0, zx1);  zy1 = max(0, zy1)
+    zx2 = min(mw - 1, zx2); zy2 = min(mh - 1, zy2)
+    if zx2 <= zx1 or zy2 <= zy1:
+        return []
+    region = mask_bin[zy1:zy2, zx1:zx2]
+    ys, xs = np.where(region > 0)
+    xs = xs + zx1
+    ys = ys + zy1
     if len(xs) == 0:
         return []
     if len(xs) < n_points:
@@ -456,6 +602,7 @@ def main():
     cached_masks_bin  = []   # list of np.ndarray (binární masky)
     last_mesh_tick    = 0.0  # čas posledního resample meshe
     mesh_points_cache = {}   # idx -> points
+    mesh_zone_state   = {}   # idx -> (zone_idx, zone_start_tick)
 
     # audio stav
     prev_det_count = 0
@@ -517,15 +664,24 @@ def main():
                     cached_detections.append(det)
                     cached_masks_bin.append(mask_bin)
 
-            # resample mesh bodů každých 0.4 s
+            # resample mesh bodů každých 0.4 s + zone cycling pro osoby
             if tick - last_mesh_tick > 0.4:
                 last_mesh_tick = tick
                 new_cache = {}
                 for i, (det, mbin) in enumerate(zip(cached_detections, cached_masks_bin)):
                     if mbin is not None:
-                        lbl   = det["label"]
-                        n_pts = 150 if lbl == "person" else 80
-                        new_cache[i] = sample_points_in_mask(mbin, n_pts)
+                        lbl      = det["label"]
+                        bbox_det = (det["x1"], det["y1"], det["x2"], det["y2"])
+                        if lbl == "person":
+                            zone_idx, zone_start = mesh_zone_state.get(i, (0, tick))
+                            if tick - zone_start > ZONE_DURATION:
+                                zone_idx   = (zone_idx + 1) % len(BODY_ZONES)
+                                zone_start = tick
+                            mesh_zone_state[i] = (zone_idx, zone_start)
+                            zbbox = get_zone_bbox(bbox_det, BODY_ZONES[zone_idx])
+                            new_cache[i] = sample_points_in_zone(mbin, zbbox, n_points=60)
+                        else:
+                            new_cache[i] = sample_points_in_mask(mbin, 80)
                 mesh_points_cache = new_cache
 
         # ---------------------------------------------------------------
@@ -555,14 +711,24 @@ def main():
             if mask_bin is not None:
                 pts = mesh_points_cache.get(i)
                 if pts:
-                    # při kreslení meshe použijeme uložené body
-                    color  = (200, 200, 200) if lbl == "person" else (140, 140, 140)
+                    color     = (200, 200, 200) if lbl == "person" else (140, 140, 140)
+                    zone_bbox = None
+                    if lbl == "person":
+                        zone_idx, _ = mesh_zone_state.get(i, (0, tick))
+                        zone_bbox   = get_zone_bbox((x1, y1, x2, y2), BODY_ZONES[zone_idx])
+                        # label zóny vedle bboxu
+                        zone_name = BODY_ZONES[zone_idx][0]
+                        put_text_outlined(overlay, f"SCAN: {zone_name}",
+                                          (x2 + 4, zone_bbox[1] + 10), 0.30, RED_DIM)
                     _draw_cached_mesh(overlay, pts, mask_bin,
-                                      (x1, y1, x2, y2), color)
+                                      (x1, y1, x2, y2), color, zone_bbox)
 
         # HUD per-detekce (na overlay)
         for det in cached_detections:
             draw_detection(overlay, det, frame.shape, tick, debug=debug_mode)
+
+        # mřížka na overlay (před blendem)
+        draw_global_grid(overlay, tick)
 
         # zkombinuj overlay s filtrovaným framem (85/15)
         out = cv2.addWeighted(overlay, 0.85, filtered, 0.15, 0)
@@ -575,6 +741,8 @@ def main():
             fps_timer = tick
 
         draw_global_hud(out, fps, len(cached_detections), frame_no)
+        draw_scan_panel(out, tick)
+        draw_center_reticle(out, tick)
 
         # ---------------------------------------------------------------
         # Zvukové události
@@ -624,24 +792,33 @@ def main():
 # ---------------------------------------------------------------------------
 
 def _draw_cached_mesh(frame: np.ndarray, points: list, mask_bin: np.ndarray,
-                      bbox: tuple, color: tuple) -> None:
-    """Delaunay triangulace z předpočítaných bodů."""
+                      bbox: tuple, color: tuple,
+                      zone_bbox: tuple = None) -> None:
+    """Delaunay triangulace z předpočítaných bodů. zone_bbox omezuje kreslení na část těla."""
     x1, y1, x2, y2 = bbox
-    w = x2 - x1
-    h = y2 - y1
-    if w < 4 or h < 4 or len(points) < 4:
+    if len(points) < 4:
         return
 
-    corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2),
-               ((x1 + x2) // 2, y1), ((x1 + x2) // 2, y2),
-               (x1, (y1 + y2) // 2), (x2, (y1 + y2) // 2)]
+    # oblast pro Subdiv2D – buď celý bbox nebo zóna
+    if zone_bbox:
+        rx1, ry1, rx2, ry2 = zone_bbox
+    else:
+        rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+    rw = max(rx2 - rx1, 4)
+    rh = max(ry2 - ry1, 4)
+
+    corners = [
+        (rx1, ry1), (rx2, ry1), (rx1, ry2), (rx2, ry2),
+        ((rx1 + rx2) // 2, ry1), ((rx1 + rx2) // 2, ry2),
+        (rx1, (ry1 + ry2) // 2), (rx2, (ry1 + ry2) // 2),
+    ]
     all_pts = list(points) + corners
 
-    rect   = (x1, y1, w, h)
+    rect   = (rx1, ry1, rw, rh)
     subdiv = cv2.Subdiv2D(rect)
     for p in all_pts:
         px, py = int(p[0]), int(p[1])
-        if x1 <= px <= x2 and y1 <= py <= y2:
+        if rx1 <= px <= rx2 and ry1 <= py <= ry2:
             try:
                 subdiv.insert((float(px), float(py)))
             except cv2.error:
@@ -657,12 +834,17 @@ def _draw_cached_mesh(frame: np.ndarray, points: list, mask_bin: np.ndarray,
         pt1 = (t[0], t[1])
         pt2 = (t[2], t[3])
         pt3 = (t[4], t[5])
-        cx  = (pt1[0] + pt2[0] + pt3[0]) // 3
-        cy  = (pt1[1] + pt2[1] + pt3[1]) // 3
-        if 0 <= cy < mh and 0 <= cx < mw and mask_bin[cy, cx] > 0:
-            cv2.line(frame, pt1, pt2, color, 1, cv2.LINE_AA)
-            cv2.line(frame, pt2, pt3, color, 1, cv2.LINE_AA)
-            cv2.line(frame, pt3, pt1, color, 1, cv2.LINE_AA)
+        tcx = (pt1[0] + pt2[0] + pt3[0]) // 3
+        tcy = (pt1[1] + pt2[1] + pt3[1]) // 3
+        # musí ležet uvnitř masky
+        if not (0 <= tcy < mh and 0 <= tcx < mw and mask_bin[tcy, tcx] > 0):
+            continue
+        # musí ležet uvnitř zóny (pokud je zadána)
+        if zone_bbox and not (rx1 <= tcx <= rx2 and ry1 <= tcy <= ry2):
+            continue
+        cv2.line(frame, pt1, pt2, color, 1, cv2.LINE_AA)
+        cv2.line(frame, pt2, pt3, color, 1, cv2.LINE_AA)
+        cv2.line(frame, pt3, pt1, color, 1, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
