@@ -308,6 +308,144 @@ def draw_center_reticle(img: np.ndarray, tick: float) -> None:
         cv2.circle(img, (x, y), 1, col, -1, cv2.LINE_AA)
 
 
+def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
+    """Split-image rangefinder hledáček pohybující se po obrazovce – T2 styl."""
+    h, w = img.shape[:2]
+
+    # Lissajousův pohyb – dvě různé frekvence → neperiodická dráha
+    margin_x = int(w * 0.28)
+    margin_y = int(h * 0.22)
+    cx = int(w / 2 + margin_x * np.sin(tick * 0.31))
+    cy = int(h / 2 + margin_y * np.sin(tick * 0.47 + 1.1))
+
+    r_outer = int(min(w, h) * 0.115)  # ~11.5 % kratší strany
+    r_inner = int(r_outer * 0.38)
+    col     = RED_TEXT
+    col_dim = RED_DIM
+
+    # ---- poloprůhledný bílý fill kruhu --------------------------------
+    fill = img.copy()
+    cv2.circle(fill, (cx, cy), r_outer, (255, 255, 255), -1)
+    cv2.addWeighted(fill, 0.25, img, 0.75, 0, img)
+
+    # ---- split-image rangefinder linky (tmavé, kreslí se přes fill) ---
+    spacing = max(int(r_outer * 0.22), 4)
+    for dy in range(-r_outer + spacing // 2, r_outer, spacing):
+        if abs(dy) >= r_outer:
+            continue
+        half_w    = int(np.sqrt(r_outer ** 2 - dy ** 2))
+        y         = cy + dy
+        is_center = abs(dy) <= spacing // 2
+        color     = (80, 80, 80) if is_center else (120, 120, 120)
+        cv2.line(img, (cx - half_w, y), (cx + half_w, y), color, 1, cv2.LINE_AA)
+
+    # ---- vnitřní kruh -------------------------------------------------
+    cv2.circle(img, (cx, cy), r_inner, (60, 60, 60), 1, cv2.LINE_AA)
+
+    # ---- tenký vertikální kříž (jen uvnitř vnitřního kruhu) -----------
+    cv2.line(img, (cx, cy - r_inner), (cx, cy + r_inner), (80, 80, 80), 1, cv2.LINE_AA)
+
+    # ---- centrální tečka ----------------------------------------------
+    cv2.circle(img, (cx, cy), 2, (40, 40, 40), -1, cv2.LINE_AA)
+
+    # ---- vnější kruh s tick marks ------------------------------------
+    cv2.circle(img, (cx, cy), r_outer, col, 1, cv2.LINE_AA)
+    for deg in range(0, 360, 45):
+        a    = np.radians(deg)
+        tlen = 9 if deg % 90 == 0 else 5
+        xo = int(cx + r_outer          * np.cos(a))
+        yo = int(cy + r_outer          * np.sin(a))
+        xi = int(cx + (r_outer - tlen) * np.cos(a))
+        yi = int(cy + (r_outer - tlen) * np.sin(a))
+        cv2.line(img, (xi, yi), (xo, yo), col, 1, cv2.LINE_AA)
+
+    # ---- pulzující vnější kruh (animovaný) ---------------------------
+    pulse = int(r_outer * 1.30 + r_outer * 0.06 * np.sin(tick * 3.2))
+    layer = img.copy()
+    cv2.circle(layer, (cx, cy), pulse, col_dim, 1, cv2.LINE_AA)
+    cv2.addWeighted(layer, 0.45, img, 0.55, 0, img)
+
+
+def draw_compass_rose(img: np.ndarray, tick: float) -> None:
+    """Kompasová růžice vpravo nahoře – jako ve filmu T1/T2."""
+    h, w = img.shape[:2]
+    cx = w - 68
+    cy = 72
+    r  = 38
+    col     = RED_TEXT
+    col_dim = RED_DIM
+
+    cv2.circle(img, (cx, cy), r,     col_dim, 1, cv2.LINE_AA)
+    cv2.circle(img, (cx, cy), r // 3, col_dim, 1, cv2.LINE_AA)
+
+    # hlavní světové strany + labels
+    for deg, label in [(0, "N"), (90, "E"), (180, "S"), (270, "W")]:
+        a     = np.radians(deg - 90)
+        xo    = int(cx + r       * np.cos(a))
+        yo    = int(cy + r       * np.sin(a))
+        xi    = int(cx + (r - 9) * np.cos(a))
+        yi    = int(cy + (r - 9) * np.sin(a))
+        cv2.line(img, (xi, yi), (xo, yo), col, 2, cv2.LINE_AA)
+        xl = int(cx + (r + 10) * np.cos(a))
+        yl = int(cy + (r + 10) * np.sin(a))
+        put_text_outlined(img, label, (xl - 4, yl + 4), 0.28, col)
+
+    # vedlejší světové strany
+    for deg, label in [(45, "NE"), (135, "SE"), (225, "SW"), (315, "NW")]:
+        a  = np.radians(deg - 90)
+        xo = int(cx + r       * np.cos(a))
+        yo = int(cy + r       * np.sin(a))
+        xi = int(cx + (r - 5) * np.cos(a))
+        yi = int(cy + (r - 5) * np.sin(a))
+        cv2.line(img, (xi, yi), (xo, yo), col_dim, 1, cv2.LINE_AA)
+        xl = int(cx + (r + 10) * np.cos(a))
+        yl = int(cy + (r + 10) * np.sin(a))
+        put_text_outlined(img, label, (xl - 7, yl + 4), 0.23, col_dim)
+
+    # jehla kompasu – vždy ukazuje na sever
+    nx = int(cx + (r - 7) * np.cos(np.radians(-90)))
+    ny = int(cy + (r - 7) * np.sin(np.radians(-90)))
+    cv2.line(img, (cx, cy), (nx, ny), col, 2, cv2.LINE_AA)
+    sx = int(cx + (r // 2) * np.cos(np.radians(90)))
+    sy = int(cy + (r // 2) * np.sin(np.radians(90)))
+    cv2.line(img, (cx, cy), (sx, sy), col_dim, 1, cv2.LINE_AA)
+
+
+def draw_scan_levels(img: np.ndarray, tick: float) -> None:
+    """SCAN LEVELS – scrollující číselná data vlevo nahoře."""
+    h, w = img.shape[:2]
+    rng = random.Random(int(tick / 0.9))
+
+    lines = ["SCAN LEVELS:", "." * 16]
+    for _ in range(7):
+        a = rng.randint(100000, 999999)
+        b = rng.randint(100, 999)
+        c = rng.randint(10, 99)
+        lines.append(f"{a} {b} {c}")
+
+    y = 38
+    for line in lines:
+        color = RED_TEXT if line.startswith("SCAN") else RED_DIM
+        put_text_outlined(img, line, (10, y), 0.32, color)
+        y += 12
+
+
+def draw_search_criteria(img: np.ndarray, tick: float) -> None:
+    """SEARCH CRITERIA / MATCH MODE / ALL LEVELS OPERATIVE – vlevo dole."""
+    h, w = img.shape[:2]
+    match_num = (int(tick / 3.1) * 47 + 5498) % 99999
+    lines = [
+        "SEARCH CRITERIA",
+        f"MATCH MODE {match_num:05d}",
+        "ALL LEVELS OPERATIVE",
+    ]
+    y = h - len(lines) * 13 - 28
+    for line in lines:
+        color = RED_TEXT if "SEARCH" in line else RED_DIM
+        put_text_outlined(img, line, (10, y), 0.32, color)
+        y += 13
+
+
 # ---------------------------------------------------------------------------
 # Segmentační obrys – T2 styl
 # ---------------------------------------------------------------------------
@@ -510,7 +648,7 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
     if is_person and int(tick * 2) % 2 == 0:
         cv2.circle(img, (cx, cy), 6, RED_TEXT, 2, cv2.LINE_AA)
 
-    # info box
+    # info box (nad/pod bboxem)
     display_name = "HUMAN" if is_person else label.upper()
     conf_str     = f"CONF: {int(conf * 100)}%"
 
@@ -518,9 +656,8 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
     height_str = ""
     if is_person:
         phrase_idx = int(tick / 2) % len(PERSON_PHRASES)
-        # per-objekt rotace frází (použij idx jako offset)
-        phrase = PERSON_PHRASES[(phrase_idx + idx) % len(PERSON_PHRASES)]
-        est_h  = int((y2 - y1) / h * 175)
+        phrase     = PERSON_PHRASES[(phrase_idx + idx) % len(PERSON_PHRASES)]
+        est_h      = int((y2 - y1) / h * 175)
         height_str = f"HEIGHT EST: {est_h}cm"
 
     lines = [display_name, conf_str]
@@ -528,26 +665,69 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
         lines.append(phrase)
         lines.append(height_str)
 
-    line_h  = 16
-    box_h   = len(lines) * line_h + 6
-    box_w   = max(cv2.getTextSize(l, FONT, FONT_SM, 1)[0][0] for l in lines) + 10
+    line_h = 16
+    box_h  = len(lines) * line_h + 6
+    box_w  = max(cv2.getTextSize(l, FONT, FONT_SM, 1)[0][0] for l in lines) + 10
 
-    # umístění boxu – nad bboxem nebo pod ním (pokud je u horního okraje)
     if y1 - box_h - 4 >= 0:
         bx1, by1 = x1, y1 - box_h - 4
     else:
         bx1, by1 = x1, y2 + 4
 
-    bx2 = bx1 + box_w
-    by2 = by1 + box_h
-
-    # tmavé poloprůhledné pozadí info boxu
     bg = img.copy()
-    cv2.rectangle(bg, (bx1, by1), (bx2, by2), (0, 0, 40), -1)
-    cv2.addWeighted(bg, 0.55, img, 0.45, 0, img)
-
+    cv2.rectangle(bg, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 0, 0), -1)
+    cv2.addWeighted(bg, 0.50, img, 0.50, 0, img)
     for i, line in enumerate(lines):
         put_text_outlined(img, line, (bx1 + 4, by1 + (i + 1) * line_h), FONT_SM, RED_TEXT)
+
+    # ------------------------------------------------------------------
+    # CRITERIA panel – tělesné míry osoby (vpravo od bboxu nebo na pravé straně)
+    # ------------------------------------------------------------------
+    if is_person:
+        rng2 = random.Random(idx * 1337 + int(tick / 6))
+        meas = [
+            ("HGHT", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("WGHT", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("SHLD", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("BACK", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("INSM", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("SLEV", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("CHST", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("COLR", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("BICP", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+            ("TRIC", rng2.randint(100000, 999999), rng2.randint(100, 999)),
+        ]
+        panel_w = 168
+        # umístění: vlevo od bboxu pokud je místo, jinak vpravo, pokud tam vychází mimo obraz – vlevo
+        if x2 + panel_w + 6 <= w:
+            px = x2 + 6
+        elif x1 - panel_w - 6 >= 0:
+            px = x1 - panel_w - 6
+        else:
+            px = max(w - panel_w - 6, 0)
+        py = max(y1, 35)
+
+        put_text_outlined(img, "CRITERIA:", (px, py),      0.33, RED_TEXT)
+        put_text_outlined(img, "." * 14,    (px, py + 12), 0.33, RED_DIM)
+        for j, (lbl, v1, v2) in enumerate(meas):
+            put_text_outlined(img, f"{lbl}  {v1} {v2}",
+                              (px, py + 24 + j * 12), 0.30, RED_DIM)
+        # ASSESS
+        assess = "ASSESS: SUITABLE" if conf >= 0.70 else "ASSESS: POSSIBLE"
+        put_text_outlined(img, assess,
+                          (px, py + 24 + len(meas) * 12 + 5), 0.30, RED_TEXT)
+
+        # PROBABILITY (vlevo od/pod bboxem)
+        prob_str = f"PROBABILITY .{int(conf * 100):02d}"
+        put_text_outlined(img, prob_str, (x1, y2 + 14), 0.32, RED_DIM)
+
+    # ------------------------------------------------------------------
+    # VISUAL: MODEL XXX – pro ne-osoby
+    # ------------------------------------------------------------------
+    else:
+        model_num = random.Random(idx * 777).randint(100, 999)
+        put_text_outlined(img, "VISUAL:",          (x1, y2 + 14), 0.32, RED_TEXT)
+        put_text_outlined(img, f"MODEL {model_num}", (x1, y2 + 27), 0.32, RED_DIM)
 
     # debug: raw YOLO bbox
     if debug:
@@ -741,8 +921,12 @@ def main():
             fps_timer = tick
 
         draw_global_hud(out, fps, len(cached_detections), frame_no)
+        draw_scan_levels(out, tick)
+        draw_compass_rose(out, tick)
         draw_scan_panel(out, tick)
+        draw_search_criteria(out, tick)
         draw_center_reticle(out, tick)
+        draw_camera_viewfinder(out, tick)
 
         # ---------------------------------------------------------------
         # Zvukové události
