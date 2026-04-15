@@ -327,7 +327,36 @@ def draw_right_hud(img: np.ndarray, tick: float) -> None:
     font_scale = 0.65
     line_h     = 22
 
-    mode = int(tick / _RIGHT_HUD_SWITCH) % 5  # 0=scan mode+grid, 1=acquire, 2=priority, 3=data dump, 4=env scan
+    mode = int(tick / _RIGHT_HUD_SWITCH) % 6  # 0=scan mode+grid, 1=acquire, 2=priority, 3=data dump, 4=env scan, 5=compass
+
+    # ------------------------------------------------------------------ #
+    # Mód 5 – kompasová růžice + TARGET FIELD                            #
+    # ------------------------------------------------------------------ #
+    if mode == 5:
+        panel_w = 200
+        panel_h = 220
+        pos_seed = int(tick / 10)
+        pos_rng  = random.Random(pos_seed + 999)
+        x_min = w * 2 // 3
+        x_max = max(x_min + 1, w - panel_w - 10)
+        y_min = 35
+        y_max = max(y_min + 1, h - panel_h - 35)
+        px = pos_rng.randint(x_min, x_max)
+        py = pos_rng.randint(y_min, y_max)
+
+        r  = 58
+        cx = px + panel_w // 2
+        cy = py + r + 12
+        _draw_compass_rose_at(img, cx, cy, r)
+
+        # TARGET FIELD text pod růžicí
+        rng = random.Random(int(tick / 4.0))
+        tf_y = cy + r + 28
+        put_text_outlined(img, "TARGET FIELD:", (px, tf_y), 0.40, RED_TEXT)
+        for i in range(3):
+            row = "".join(str(rng.randint(0, 9)) for _ in range(12))
+            put_text_outlined(img, row, (px, tf_y + (i + 1) * 18), 0.38, RED_TEXT)
+        return
 
     if mode == 0:
         scan_num = (int(tick / 2.3) * 137 + 3958) % 99999
@@ -489,49 +518,28 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
     cv2.addWeighted(layer, 0.25, img, 0.75, 0, img)
 
 
-def draw_compass_rose(img: np.ndarray, tick: float) -> None:
-    """Kompasová růžice vpravo nahoře – jako ve filmu T1/T2."""
-    h, w = img.shape[:2]
-    cx = w - 68
-    cy = 72
-    r  = 38
-    col     = RED_TEXT
-    col_dim = RED_DIM
+def _draw_compass_rose_at(img: np.ndarray, cx: int, cy: int, r: int) -> None:
+    """Kompasová růžice T2 stylu – všechny paprsky stejně dlouhé, texty vně."""
+    col = RED_TEXT
 
-    cv2.circle(img, (cx, cy), r,     col_dim, 1, cv2.LINE_AA)
-    cv2.circle(img, (cx, cy), r // 3, col_dim, 1, cv2.LINE_AA)
-
-    # hlavní světové strany + labels
-    for deg, label in [(0, "N"), (90, "E"), (180, "S"), (270, "W")]:
-        a     = np.radians(deg - 90)
-        xo    = int(cx + r       * np.cos(a))
-        yo    = int(cy + r       * np.sin(a))
-        xi    = int(cx + (r - 9) * np.cos(a))
-        yi    = int(cy + (r - 9) * np.sin(a))
-        cv2.line(img, (xi, yi), (xo, yo), col, 2, cv2.LINE_AA)
-        xl = int(cx + (r + 10) * np.cos(a))
-        yl = int(cy + (r + 10) * np.sin(a))
-        put_text_outlined(img, label, (xl - 4, yl + 4), 0.28, col)
-
-    # vedlejší světové strany
-    for deg, label in [(45, "NE"), (135, "SE"), (225, "SW"), (315, "NW")]:
+    # 8 paprsků ze středu na okraj – všechny stejné délky, bez kruhů
+    for deg, label, loff in [
+        (  0, "N",  (-4, -10)),
+        ( 45, "NE", (  3,  -6)),
+        ( 90, "E",  ( 10,   4)),
+        (135, "SE", (  3,   12)),
+        (180, "S",  (-4,   14)),
+        (225, "SW", (-18,  12)),
+        (270, "W",  (-18,   4)),
+        (315, "NW", (-18,  -6)),
+    ]:
         a  = np.radians(deg - 90)
-        xo = int(cx + r       * np.cos(a))
-        yo = int(cy + r       * np.sin(a))
-        xi = int(cx + (r - 5) * np.cos(a))
-        yi = int(cy + (r - 5) * np.sin(a))
-        cv2.line(img, (xi, yi), (xo, yo), col_dim, 1, cv2.LINE_AA)
-        xl = int(cx + (r + 10) * np.cos(a))
-        yl = int(cy + (r + 10) * np.sin(a))
-        put_text_outlined(img, label, (xl - 7, yl + 4), 0.23, col_dim)
-
-    # jehla kompasu – vždy ukazuje na sever
-    nx = int(cx + (r - 7) * np.cos(np.radians(-90)))
-    ny = int(cy + (r - 7) * np.sin(np.radians(-90)))
-    cv2.line(img, (cx, cy), (nx, ny), col, 2, cv2.LINE_AA)
-    sx = int(cx + (r // 2) * np.cos(np.radians(90)))
-    sy = int(cy + (r // 2) * np.sin(np.radians(90)))
-    cv2.line(img, (cx, cy), (sx, sy), col_dim, 1, cv2.LINE_AA)
+        xo = int(cx + r * np.cos(a))
+        yo = int(cy + r * np.sin(a))
+        cv2.line(img, (cx, cy), (xo, yo), col, 1, cv2.LINE_AA)
+        xl = int(cx + (r + 11) * np.cos(a)) + loff[0]
+        yl = int(cy + (r + 11) * np.sin(a)) + loff[1]
+        put_text_outlined(img, label, (xl, yl), 0.32, col)
 
 
 _LEFT_HUD_TAGS     = ["VEHI", "SIZE", "TSPD", "HPWR", "CODE", "RNGE", "CAPC", "MAXI", "TORQ"]
@@ -1122,7 +1130,6 @@ def main():
 
         draw_global_hud(out, fps, len(cached_detections), frame_no)
         draw_left_hud(out, tick)
-        draw_compass_rose(out, tick)
         draw_right_hud(out, tick)
         draw_search_criteria(out, tick)
 
