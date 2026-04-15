@@ -167,19 +167,19 @@ def apply_scanlines(frame: np.ndarray) -> np.ndarray:
     return out
 
 
+_vignette_cache: dict = {}
+
 def apply_vignette(frame: np.ndarray) -> np.ndarray:
-    """Gaussovský vignette – ztmavení okrajů."""
+    """Gaussovský vignette – maska se počítá jednou a cachuje."""
     h, w = frame.shape[:2]
-    sigma_x = w * 0.55
-    sigma_y = h * 0.55
-    gx = cv2.getGaussianKernel(w, sigma_x)
-    gy = cv2.getGaussianKernel(h, sigma_y)
-    kernel = gy * gx.T
-    mask = kernel / kernel.max()
-    # blend: 0.55 váha vignette darkness
-    vignette = np.clip(mask + 0.45, 0.0, 1.0).astype(np.float32)
-    out = (frame.astype(np.float32) * vignette[:, :, np.newaxis])
-    return np.clip(out, 0, 255).astype(np.uint8)
+    if (h, w) not in _vignette_cache:
+        gx = cv2.getGaussianKernel(w, w * 0.55)
+        gy = cv2.getGaussianKernel(h, h * 0.55)
+        kernel = gy * gx.T
+        mask = kernel / kernel.max()
+        _vignette_cache[(h, w)] = np.clip(mask + 0.45, 0.0, 1.0).astype(np.float32)
+    v = _vignette_cache[(h, w)]
+    return np.clip(frame.astype(np.float32) * v[:, :, np.newaxis], 0, 255).astype(np.uint8)
 
 
 def add_noise(frame: np.ndarray) -> np.ndarray:
@@ -222,31 +222,26 @@ def draw_corner_bracket(img, x1, y1, x2, y2, size=14, color=RED_TEXT, thickness=
 # ---------------------------------------------------------------------------
 
 def draw_global_grid(img: np.ndarray, tick: float) -> None:
-    """Semitransparentní skenovací mřížka a pohyblivá sweep linka – T2 styl."""
+    """Skenovací mřížka a sweep linka – kreslí přímo bez alokace extra bufferu."""
     h, w = img.shape[:2]
-    layer = np.zeros_like(img)
-    spacing = 30
+    spacing = 32
     gc = (38, 38, 38)
     for x in range(0, w + spacing, spacing):
-        cv2.line(layer, (x, 0), (x, h), gc, 1)
+        cv2.line(img, (x, 0), (x, h), gc, 1)
     for y in range(0, h + spacing, spacing):
-        cv2.line(layer, (0, y), (w, y), gc, 1)
+        cv2.line(img, (0, y), (w, y), gc, 1)
 
-    # pohyblivá sweep linka dolů
-    sweep_period = 3.5
-    sweep_y = int((tick % sweep_period) / sweep_period * h)
-    cv2.line(layer, (0, sweep_y), (w, sweep_y), (140, 140, 140), 1)
-    for off in range(1, 12):
+    sweep_y = int((tick % 3.5) / 3.5 * h)
+    cv2.line(img, (0, sweep_y), (w, sweep_y), (130, 130, 130), 1)
+    for off in range(1, 10):
         sy = sweep_y - off
         if sy >= 0:
-            alpha = int(100 * (1 - off / 12))
-            cv2.line(layer, (0, sy), (w, sy), (alpha, alpha, alpha), 1)
-
-    cv2.add(img, layer, img)
+            v = int(90 * (1 - off / 10))
+            cv2.line(img, (0, sy), (w, sy), (v, v, v), 1)
 
 
 def draw_scan_panel(img: np.ndarray, tick: float) -> None:
-    """SCAN MODE datový panel – pravý dolní roh (jako v T2)."""
+    """SCAN MODE datový panel – pravá třetina obrazu, pozice se mění každých 10 s."""
     h, w = img.shape[:2]
 
     scan_num = (int(tick / 2.3) * 137 + 3958) % 99999
@@ -267,19 +262,29 @@ def draw_scan_panel(img: np.ndarray, tick: float) -> None:
         priority,
     ] + data_rows
 
-    line_h  = 13
-    panel_h = len(lines) * line_h + 8
-    panel_w = 196
-    px = w - panel_w - 8
-    py = h - panel_h - 28
+    font_scale = 0.65
+    line_h     = 22
+    panel_h    = len(lines) * line_h + 10
+    panel_w    = 280
 
+    # pozice se mění každých 10 s v rámci celé pravé třetiny
+    pos_seed = int(tick / 10)
+    pos_rng  = random.Random(pos_seed)
+    x_min = w * 2 // 3
+    x_max = max(x_min + 1, w - panel_w - 10)
+    y_min = 35
+    y_max = max(y_min + 1, h - panel_h - 35)
+    px = pos_rng.randint(x_min, x_max)
+    py = pos_rng.randint(y_min, y_max)
+
+    # poloprůhledné pozadí
     bg = img.copy()
-    cv2.rectangle(bg, (px - 3, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
+    cv2.rectangle(bg, (px - 4, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
     cv2.addWeighted(bg, 0.45, img, 0.55, 0, img)
 
     for i, line in enumerate(lines):
         color = RED_TEXT if i < 3 else RED_DIM
-        put_text_outlined(img, line, (px, py + (i + 1) * line_h), 0.33, color)
+        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, color)
 
 
 def draw_center_reticle(img: np.ndarray, tick: float) -> None:
@@ -318,26 +323,14 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
     cx = int(w / 2 + margin_x * np.sin(tick * 0.31))
     cy = int(h / 2 + margin_y * np.sin(tick * 0.47 + 1.1))
 
-    r_outer = int(min(w, h) * 0.115)  # ~11.5 % kratší strany
+    r_outer = int(min(w, h) * 0.080)  # ~8 % kratší strany
     r_inner = int(r_outer * 0.38)
     col     = RED_TEXT
     col_dim = RED_DIM
 
     # ---- poloprůhledný bílý fill kruhu --------------------------------
-    fill = img.copy()
-    cv2.circle(fill, (cx, cy), r_outer, (255, 255, 255), -1)
-    cv2.addWeighted(fill, 0.25, img, 0.75, 0, img)
-
-    # ---- split-image rangefinder linky (tmavé, kreslí se přes fill) ---
-    spacing = max(int(r_outer * 0.22), 4)
-    for dy in range(-r_outer + spacing // 2, r_outer, spacing):
-        if abs(dy) >= r_outer:
-            continue
-        half_w    = int(np.sqrt(r_outer ** 2 - dy ** 2))
-        y         = cy + dy
-        is_center = abs(dy) <= spacing // 2
-        color     = (80, 80, 80) if is_center else (120, 120, 120)
-        cv2.line(img, (cx - half_w, y), (cx + half_w, y), color, 1, cv2.LINE_AA)
+    layer = img.copy()
+    cv2.circle(layer, (cx, cy), r_outer, (255, 255, 255), -1)
 
     # ---- vnitřní kruh -------------------------------------------------
     cv2.circle(img, (cx, cy), r_inner, (60, 60, 60), 1, cv2.LINE_AA)
@@ -359,11 +352,10 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
         yi = int(cy + (r_outer - tlen) * np.sin(a))
         cv2.line(img, (xi, yi), (xo, yo), col, 1, cv2.LINE_AA)
 
-    # ---- pulzující vnější kruh (animovaný) ---------------------------
+    # ---- pulzující vnější kruh – do stejného layer jako fill ---------
     pulse = int(r_outer * 1.30 + r_outer * 0.06 * np.sin(tick * 3.2))
-    layer = img.copy()
     cv2.circle(layer, (cx, cy), pulse, col_dim, 1, cv2.LINE_AA)
-    cv2.addWeighted(layer, 0.45, img, 0.55, 0, img)
+    cv2.addWeighted(layer, 0.25, img, 0.75, 0, img)
 
 
 def draw_compass_rose(img: np.ndarray, tick: float) -> None:
@@ -412,7 +404,7 @@ def draw_compass_rose(img: np.ndarray, tick: float) -> None:
 
 
 def draw_scan_levels(img: np.ndarray, tick: float) -> None:
-    """SCAN LEVELS – scrollující číselná data vlevo nahoře."""
+    """SCAN LEVELS – scrollující číselná data, pohybuje se v levé třetině."""
     h, w = img.shape[:2]
     rng = random.Random(int(tick / 0.9))
 
@@ -423,11 +415,27 @@ def draw_scan_levels(img: np.ndarray, tick: float) -> None:
         c = rng.randint(10, 99)
         lines.append(f"{a} {b} {c}")
 
-    y = 38
-    for line in lines:
+    font_scale = 0.65
+    line_h     = 22
+    panel_h    = len(lines) * line_h + 10
+    panel_w    = 260
+
+    pos_seed = int(tick / 10)
+    pos_rng  = random.Random(pos_seed)
+    x_min = 10
+    x_max = max(x_min + 1, w // 3 - panel_w)
+    y_min = 35
+    y_max = max(y_min + 1, h - panel_h - 35)
+    px = pos_rng.randint(x_min, x_max)
+    py = pos_rng.randint(y_min, y_max)
+
+    bg = img.copy()
+    cv2.rectangle(bg, (px - 4, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
+    cv2.addWeighted(bg, 0.45, img, 0.55, 0, img)
+
+    for i, line in enumerate(lines):
         color = RED_TEXT if line.startswith("SCAN") else RED_DIM
-        put_text_outlined(img, line, (10, y), 0.32, color)
-        y += 12
+        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, color)
 
 
 def draw_search_criteria(img: np.ndarray, tick: float) -> None:
@@ -461,10 +469,6 @@ def draw_segmentation_outline(frame: np.ndarray, mask_pts, label: str) -> None:
     cv2.polylines(frame, [pts], True, glow,   thickness=5, lineType=cv2.LINE_AA)
     # hlavní obrys
     cv2.polylines(frame, [pts], True, bright, thickness=2, lineType=cv2.LINE_AA)
-    # vnitřní semitransparentní fill – thermal glow
-    fill = frame.copy()
-    cv2.fillPoly(fill, [pts], (200, 200, 200))
-    cv2.addWeighted(fill, 0.10, frame, 0.90, 0, frame)
 
 
 # ---------------------------------------------------------------------------
@@ -638,11 +642,9 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
     # rohové závorky kolem bboxu
     draw_corner_bracket(img, x1, y1, x2, y2, size=14, color=RED_TEXT, thickness=2)
 
-    # čárkovaná linie do středu obrazu (jen pro osoby, alpha blend 30 %)
+    # čárkovaná linie do středu obrazu (jen pro osoby)
     if is_person:
-        overlay = img.copy()
-        _dashed_line(overlay, (cx, cy), (w // 2, h // 2), RED_DIM, gap=10)
-        cv2.addWeighted(overlay, 0.30, img, 0.70, 0, img)
+        _dashed_line(img, (cx, cy), (w // 2, h // 2), (80, 80, 80), gap=10)
 
     # blikající kroužek ve středu pro osoby
     if is_person and int(tick * 2) % 2 == 0:
@@ -674,9 +676,7 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
     else:
         bx1, by1 = x1, y2 + 4
 
-    bg = img.copy()
-    cv2.rectangle(bg, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 0, 0), -1)
-    cv2.addWeighted(bg, 0.50, img, 0.50, 0, img)
+    cv2.rectangle(img, (bx1, by1), (bx1 + box_w, by1 + box_h), (0, 0, 0), -1)
     for i, line in enumerate(lines):
         put_text_outlined(img, line, (bx1 + 4, by1 + (i + 1) * line_h), FONT_SM, RED_TEXT)
 
@@ -844,31 +844,35 @@ def main():
                     cached_detections.append(det)
                     cached_masks_bin.append(mask_bin)
 
-            # resample mesh bodů každých 0.4 s + zone cycling pro osoby
-            if tick - last_mesh_tick > 0.4:
+            # resample mesh + Delaunay triangulace každých 0.5 s
+            if tick - last_mesh_tick > 0.5:
                 last_mesh_tick = tick
                 new_cache = {}
                 for i, (det, mbin) in enumerate(zip(cached_detections, cached_masks_bin)):
-                    if mbin is not None:
-                        lbl      = det["label"]
-                        bbox_det = (det["x1"], det["y1"], det["x2"], det["y2"])
-                        if lbl == "person":
-                            zone_idx, zone_start = mesh_zone_state.get(i, (0, tick))
-                            if tick - zone_start > ZONE_DURATION:
-                                zone_idx   = (zone_idx + 1) % len(BODY_ZONES)
-                                zone_start = tick
-                            mesh_zone_state[i] = (zone_idx, zone_start)
-                            zbbox = get_zone_bbox(bbox_det, BODY_ZONES[zone_idx])
-                            new_cache[i] = sample_points_in_zone(mbin, zbbox, n_points=60)
-                        else:
-                            new_cache[i] = sample_points_in_mask(mbin, 80)
+                    if mbin is None:
+                        continue
+                    lbl      = det["label"]
+                    bbox_det = (det["x1"], det["y1"], det["x2"], det["y2"])
+                    if lbl == "person":
+                        zone_idx, zone_start = mesh_zone_state.get(i, (0, tick))
+                        if tick - zone_start > ZONE_DURATION:
+                            zone_idx   = (zone_idx + 1) % len(BODY_ZONES)
+                            zone_start = tick
+                        mesh_zone_state[i] = (zone_idx, zone_start)
+                        zbbox = get_zone_bbox(bbox_det, BODY_ZONES[zone_idx])
+                        pts   = sample_points_in_zone(mbin, zbbox, n_points=40)
+                        tris  = _compute_triangles(pts, mbin, bbox_det, zbbox)
+                        new_cache[i] = (tris, zbbox, BODY_ZONES[zone_idx][0])
+                    else:
+                        pts  = sample_points_in_mask(mbin, 25)
+                        tris = _compute_triangles(pts, mbin, bbox_det)
+                        new_cache[i] = (tris, None, "")
                 mesh_points_cache = new_cache
 
         # ---------------------------------------------------------------
         # Aplikuj obrazové filtry
         # ---------------------------------------------------------------
         filtered = apply_red_filter(frame)
-        filtered = apply_scanlines(filtered)
         filtered = apply_vignette(filtered)
         filtered = add_noise(filtered)
 
@@ -887,28 +891,19 @@ def main():
             if mask_xy is not None and len(mask_xy) > 2:
                 draw_segmentation_outline(overlay, mask_xy, lbl)
 
-            # mesh overlay
-            if mask_bin is not None:
-                pts = mesh_points_cache.get(i)
-                if pts:
-                    color     = (200, 200, 200) if lbl == "person" else (140, 140, 140)
-                    zone_bbox = None
-                    if lbl == "person":
-                        zone_idx, _ = mesh_zone_state.get(i, (0, tick))
-                        zone_bbox   = get_zone_bbox((x1, y1, x2, y2), BODY_ZONES[zone_idx])
-                        # label zóny vedle bboxu
-                        zone_name = BODY_ZONES[zone_idx][0]
-                        put_text_outlined(overlay, f"SCAN: {zone_name}",
-                                          (x2 + 4, zone_bbox[1] + 10), 0.30, RED_DIM)
-                    _draw_cached_mesh(overlay, pts, mask_bin,
-                                      (x1, y1, x2, y2), color, zone_bbox)
+            # mesh overlay – trojúhelníky jsou předpočítané
+            entry = mesh_points_cache.get(i)
+            if entry:
+                tris, zbbox, zone_name = entry
+                color = (200, 200, 200) if lbl == "person" else (140, 140, 140)
+                _draw_triangles(overlay, tris, color)
+                if zone_name and zbbox:
+                    put_text_outlined(overlay, f"SCAN: {zone_name}",
+                                      (x2 + 4, zbbox[1] + 10), 0.30, RED_DIM)
 
         # HUD per-detekce (na overlay)
         for det in cached_detections:
             draw_detection(overlay, det, frame.shape, tick, debug=debug_mode)
-
-        # mřížka na overlay (před blendem)
-        draw_global_grid(overlay, tick)
 
         # zkombinuj overlay s filtrovaným framem (85/15)
         out = cv2.addWeighted(overlay, 0.85, filtered, 0.15, 0)
@@ -925,7 +920,7 @@ def main():
         draw_compass_rose(out, tick)
         draw_scan_panel(out, tick)
         draw_search_criteria(out, tick)
-        draw_center_reticle(out, tick)
+
         draw_camera_viewfinder(out, tick)
 
         # ---------------------------------------------------------------
@@ -975,57 +970,51 @@ def main():
 # Pomocná funkce – kreslení meshe z cachovaných bodů
 # ---------------------------------------------------------------------------
 
-def _draw_cached_mesh(frame: np.ndarray, points: list, mask_bin: np.ndarray,
-                      bbox: tuple, color: tuple,
-                      zone_bbox: tuple = None) -> None:
-    """Delaunay triangulace z předpočítaných bodů. zone_bbox omezuje kreslení na část těla."""
+def _compute_triangles(points: list, mask_bin: np.ndarray,
+                       bbox: tuple, zone_bbox: tuple = None) -> list:
+    """Spočítá a filtruje Delaunay trojúhelníky – voláno jen při resample, ne každý frame."""
     x1, y1, x2, y2 = bbox
-    if len(points) < 4:
-        return
-
-    # oblast pro Subdiv2D – buď celý bbox nebo zóna
-    if zone_bbox:
-        rx1, ry1, rx2, ry2 = zone_bbox
-    else:
-        rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+    rx1, ry1, rx2, ry2 = zone_bbox if zone_bbox else (x1, y1, x2, y2)
     rw = max(rx2 - rx1, 4)
     rh = max(ry2 - ry1, 4)
+    if len(points) < 4:
+        return []
 
     corners = [
         (rx1, ry1), (rx2, ry1), (rx1, ry2), (rx2, ry2),
         ((rx1 + rx2) // 2, ry1), ((rx1 + rx2) // 2, ry2),
         (rx1, (ry1 + ry2) // 2), (rx2, (ry1 + ry2) // 2),
     ]
-    all_pts = list(points) + corners
-
-    rect   = (rx1, ry1, rw, rh)
-    subdiv = cv2.Subdiv2D(rect)
-    for p in all_pts:
+    subdiv = cv2.Subdiv2D((rx1, ry1, rw, rh))
+    for p in list(points) + corners:
         px, py = int(p[0]), int(p[1])
         if rx1 <= px <= rx2 and ry1 <= py <= ry2:
             try:
                 subdiv.insert((float(px), float(py)))
             except cv2.error:
                 pass
-
     try:
-        triangles = subdiv.getTriangleList().astype(np.int32)
+        raw = subdiv.getTriangleList().astype(np.int32)
     except cv2.error:
-        return
+        return []
 
     mh, mw = mask_bin.shape[:2]
-    for t in triangles:
-        pt1 = (t[0], t[1])
-        pt2 = (t[2], t[3])
-        pt3 = (t[4], t[5])
+    result = []
+    for t in raw:
+        pt1, pt2, pt3 = (t[0], t[1]), (t[2], t[3]), (t[4], t[5])
         tcx = (pt1[0] + pt2[0] + pt3[0]) // 3
         tcy = (pt1[1] + pt2[1] + pt3[1]) // 3
-        # musí ležet uvnitř masky
         if not (0 <= tcy < mh and 0 <= tcx < mw and mask_bin[tcy, tcx] > 0):
             continue
-        # musí ležet uvnitř zóny (pokud je zadána)
         if zone_bbox and not (rx1 <= tcx <= rx2 and ry1 <= tcy <= ry2):
             continue
+        result.append((pt1, pt2, pt3))
+    return result
+
+
+def _draw_triangles(frame: np.ndarray, triangles: list, color: tuple) -> None:
+    """Nakreslí předpočítané trojúhelníky – žádná triangulace, jen cv2.line."""
+    for pt1, pt2, pt3 in triangles:
         cv2.line(frame, pt1, pt2, color, 1, cv2.LINE_AA)
         cv2.line(frame, pt2, pt3, color, 1, cv2.LINE_AA)
         cv2.line(frame, pt3, pt1, color, 1, cv2.LINE_AA)
