@@ -12,6 +12,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
 try:
@@ -125,6 +126,52 @@ FONT      = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SM   = 0.40
 FONT_MD   = 0.50
 
+# ---------------------------------------------------------------------------
+# PIL font (Helvetica 73 Extended Bold)
+# ---------------------------------------------------------------------------
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "font", "Helvetica73-Extended Bold.ttf")
+_pil_font_cache: dict = {}
+
+def _get_font(scale: float) -> ImageFont.FreeTypeFont:
+    px = max(9, int(scale * 40))
+    if px not in _pil_font_cache:
+        try:
+            _pil_font_cache[px] = ImageFont.truetype(_FONT_PATH, px)
+        except Exception:
+            _pil_font_cache[px] = ImageFont.load_default()
+    return _pil_font_cache[px]
+
+
+def get_text_width(text: str, scale: float) -> int:
+    bbox = _get_font(scale).getbbox(text)
+    return bbox[2] - bbox[0]
+
+
+# Fronta textových příkazů: (array_id, text, x, y, scale, bgr_color)
+_text_queue: list = []
+
+
+def flush_text(img: np.ndarray) -> None:
+    """Vykreslí všechny čekající texty pro daný array jedinou PIL konverzí."""
+    global _text_queue
+    tid = id(img)
+    items = [(t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i == tid]
+    if not items:
+        return
+    pil = Image.fromarray(img[:, :, ::-1])   # BGR → RGB
+    draw = ImageDraw.Draw(pil)
+    for text, x, y, scale, bgr in items:
+        font   = _get_font(scale)
+        ascent = font.getmetrics()[0]
+        py     = y - ascent                  # OpenCV baseline → PIL top-left
+        rgb    = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+            draw.text((x + dx, py + dy), text, font=font, fill=(0, 0, 0))
+        draw.text((x, py), text, font=font, fill=rgb)
+    img[:, :, :] = np.array(pil)[:, :, ::-1]  # RGB → BGR
+    _text_queue = [(i, t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i != tid]
+
 # Zóny těla pro částečný mesh (name, y_rel_start, y_rel_end, x_rel_start, x_rel_end)
 BODY_ZONES = [
     ("HEAD",        0.00, 0.20, 0.22, 0.78),
@@ -194,10 +241,8 @@ def add_noise(frame: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def put_text_outlined(img, text, pos, font_scale=FONT_SM, color=RED_TEXT, thickness=1):
-    """Text s černým outline pro čitelnost."""
-    x, y = pos
-    cv2.putText(img, text, (x - 1, y - 1), FONT, font_scale, (0, 0, 0),    thickness + 1, cv2.LINE_AA)
-    cv2.putText(img, text, (x,     y),     FONT, font_scale, color,         thickness,     cv2.LINE_AA)
+    """Zařadí text do fronty – vykreslí se hromadně přes flush_text()."""
+    _text_queue.append((id(img), str(text), int(pos[0]), int(pos[1]), font_scale, color))
 
 
 def draw_corner_bracket(img, x1, y1, x2, y2, size=14, color=RED_TEXT, thickness=2):
@@ -240,36 +285,118 @@ def draw_global_grid(img: np.ndarray, tick: float) -> None:
             cv2.line(img, (0, sy), (w, sy), (v, v, v), 1)
 
 
-def draw_scan_panel(img: np.ndarray, tick: float) -> None:
-    """SCAN MODE datový panel – pravá třetina obrazu, pozice se mění každých 10 s."""
+_GRID_COLS   = 12
+_GRID_ROWS   = 12
+_GRID_CELL_W = 22   # px na buňku (šířka)
+_GRID_CELL_H = 15   # px na buňku (výška)
+_GRID_W      = _GRID_COLS * _GRID_CELL_W   # 264 px
+_GRID_H      = _GRID_ROWS * _GRID_CELL_H   # 180 px
+
+
+def _draw_grid_hud(img: np.ndarray, tick: float, px: int, py: int) -> None:
+    """12×12 mřížka s plynule pohyblivými vlasovými osami X a Y."""
+    cols, rows = _GRID_COLS, _GRID_ROWS
+    cw, ch     = _GRID_CELL_W, _GRID_CELL_H
+    gw = cols * cw
+    gh = rows * ch
+
+    dim    = (255, 255, 255)
+    bright = (255, 255, 255)
+
+    # dim mřížka
+    for c in range(cols + 1):
+        x = px + c * cw
+        cv2.line(img, (x, py), (x, py + gh), dim, 1, cv2.LINE_AA)
+    for r in range(rows + 1):
+        y = py + r * ch
+        cv2.line(img, (px, y), (px + gw, y), dim, 1, cv2.LINE_AA)
+
+    # plynulý pohyb os – dvě nezávislé sinusoidy s nesouměřitelnými frekvencemi
+    # osa Y (svislá linka) se pohybuje po ose X
+    ax = px + int((gw - 1) * (0.5 + 0.5 * np.sin(tick * 0.53)))
+    # osa X (vodorovná linka) se pohybuje po ose Y
+    ay = py + int((gh - 1) * (0.5 + 0.5 * np.sin(tick * 0.37 + 1.2)))
+
+    cv2.line(img, (ax, py), (ax, py + gh), bright, 1, cv2.LINE_AA)
+    cv2.line(img, (px, ay), (px + gw, ay), bright, 1, cv2.LINE_AA)
+
+
+def draw_right_hud(img: np.ndarray, tick: float) -> None:
+    """Pravý HUD panel – střídá 6 módů každých 6 s."""
     h, w = img.shape[:2]
-
-    scan_num = (int(tick / 2.3) * 137 + 3958) % 99999
-    acq_idx  = int(tick / 4.5) % len(SCAN_ACQUIRES)
-    priority = f"PRIORITY {int(tick * 1237) % 9999999:07d}D"
-
-    rng = random.Random(int(tick / 1.8))
-    data_rows = []
-    for tag in ("VEHI", "MTRC", "TRCT"):
-        a = rng.randint(10000, 99999)
-        b = rng.randint(10000, 99999)
-        c = rng.randint(0, 99)
-        data_rows.append(f"{tag}  {a} {b} {c:02d}")
-
-    lines = [
-        f"SCAN MODE {scan_num:05d}",
-        SCAN_ACQUIRES[acq_idx],
-        priority,
-    ] + data_rows
-
     font_scale = 0.65
     line_h     = 22
-    panel_h    = len(lines) * line_h + 10
-    panel_w    = 280
 
-    # pozice se mění každých 10 s v rámci celé pravé třetiny
+    mode = int(tick / _RIGHT_HUD_SWITCH) % 5  # 0=scan mode+grid, 1=acquire, 2=priority, 3=data dump, 4=env scan
+
+    if mode == 0:
+        scan_num = (int(tick / 2.3) * 137 + 3958) % 99999
+        rng = random.Random(int(tick / 1.8))
+        lines = [f"SCAN MODE {scan_num:05d}", "." * 16]
+        for tag in _RIGHT_HUD_TAGS[:5]:
+            a = rng.randint(10000, 99999)
+            b = rng.randint(1000,  9999)
+            c = rng.randint(0,     99)
+            lines.append(f"{tag}  {a} {b} {c:02d}")
+
+    elif mode == 1:
+        acq_idx = int(tick / 4.5) % len(SCAN_ACQUIRES)
+        rng = random.Random(int(tick / 2.5))
+        lines = [SCAN_ACQUIRES[acq_idx], "*" * 14]
+        for tag in _RIGHT_HUD_TAGS:
+            n1 = rng.randint(100, 999)
+            n2 = rng.randint(10000, 99999)
+            lines.append(f"{n1} {tag}  {n2}")
+
+    elif mode == 2:
+        priority = f"PRIORITY {int(tick * 1237) % 9999999:07d}D"
+        rng = random.Random(int(tick / 3.3))
+        lines = [priority, "-" * 17]
+        for _ in range(6):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        assess = "STATUS: CONFIRMED" if rng.random() > 0.4 else "STATUS: PENDING"
+        lines.append(assess)
+
+    elif mode == 3:
+        rng = random.Random(int(tick / 1.1))
+        lines = ["DATA DUMP:", "*" * 10]
+        for _ in range(4):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        lines.append("")
+        for _ in range(3):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            lines.append(f"{a} {b}")
+
+    else:  # mode == 4
+        rng = random.Random(int(tick / 2.7))
+        temp = round(rng.uniform(36.1, 37.9), 1)
+        dist = rng.randint(1, 999)
+        lines = [
+            "ENVIRONMENT SCAN:",
+            f"TEMP: {temp}C",
+            f"RANGE: {dist:03d}m",
+            "MOTION: DETECTED",
+            "*" * 14,
+        ]
+        for _ in range(5):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+
+    panel_h = len(lines) * line_h + 10
+    panel_w = 280
+
+    # pozice se mění každých 10 s v rámci pravé třetiny obrazu
     pos_seed = int(tick / 10)
-    pos_rng  = random.Random(pos_seed)
+    pos_rng  = random.Random(pos_seed + 999)   # jiný seed než levý panel
     x_min = w * 2 // 3
     x_max = max(x_min + 1, w - panel_w - 10)
     y_min = 35
@@ -277,14 +404,18 @@ def draw_scan_panel(img: np.ndarray, tick: float) -> None:
     px = pos_rng.randint(x_min, x_max)
     py = pos_rng.randint(y_min, y_max)
 
-    # poloprůhledné pozadí
-    bg = img.copy()
-    cv2.rectangle(bg, (px - 4, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
-    cv2.addWeighted(bg, 0.45, img, 0.55, 0, img)
+    # typewriter efekt – řádky se zobrazují postupně od začátku každého módu
+    mode_start = int(tick / _RIGHT_HUD_SWITCH) * _RIGHT_HUD_SWITCH
+    elapsed    = tick - mode_start
+    visible    = max(1, int(elapsed / 0.18))   # nový řádek každých 0.18 s
 
-    for i, line in enumerate(lines):
-        color = RED_TEXT if i < 3 else RED_DIM
-        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, color)
+    for i, line in enumerate(lines[:visible]):
+        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, RED_TEXT)
+
+    # mřížka se zobrazí pouze v SCAN MODE (mode 0) – pod textovými řádky
+    if mode == 0:
+        grid_top = py + (len(lines) + 1) * line_h + 6
+        _draw_grid_hud(img, tick, px, grid_top)
 
 
 def draw_center_reticle(img: np.ndarray, tick: float) -> None:
@@ -403,22 +534,92 @@ def draw_compass_rose(img: np.ndarray, tick: float) -> None:
     cv2.line(img, (cx, cy), (sx, sy), col_dim, 1, cv2.LINE_AA)
 
 
-def draw_scan_levels(img: np.ndarray, tick: float) -> None:
-    """SCAN LEVELS – scrollující číselná data, pohybuje se v levé třetině."""
+_LEFT_HUD_TAGS     = ["VEHI", "SIZE", "TSPD", "HPWR", "CODE", "RNGE", "CAPC", "MAXI", "TORQ"]
+_LEFT_HUD_TAGS_EXT = ["VEHI", "SIZE", "TSPD", "HPWR", "CODE", "RNGE", "MAXI", "SUSP", "TORQ", "WGHT", "TANK"]
+_LEFT_HUD_SWITCH   = 5.0   # sekundy mezi přepnutím módu
+
+_RIGHT_HUD_TAGS    = ["VEHI", "MTRC", "TRCT", "LOCO", "DRVR", "FUEL", "SPNS"]
+_RIGHT_HUD_SWITCH  = 6.0   # sekundy mezi přepnutím módu (jiný rytmus než levý)
+
+
+def draw_left_hud(img: np.ndarray, tick: float) -> None:
+    """Levý HUD panel – střídá SCAN LEVELS / CRITERIA / ANALYSIS:MATCH každých 5 s."""
     h, w = img.shape[:2]
-    rng = random.Random(int(tick / 0.9))
-
-    lines = ["SCAN LEVELS:", "." * 16]
-    for _ in range(7):
-        a = rng.randint(100000, 999999)
-        b = rng.randint(100, 999)
-        c = rng.randint(10, 99)
-        lines.append(f"{a} {b} {c}")
-
     font_scale = 0.65
     line_h     = 22
-    panel_h    = len(lines) * line_h + 10
-    panel_w    = 260
+
+    mode = int(tick / _LEFT_HUD_SWITCH) % 5   # 0=scan levels, 1=criteria, 2=analysis, 3=data dump, 4=visual assessment
+
+    if mode == 0:
+        rng = random.Random(int(tick / 0.9))
+        lines = ["SCAN LEVELS:", "." * 16]
+        for _ in range(7):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        header = "SCAN"
+
+    elif mode == 1:
+        rng = random.Random(int(tick / 3.0))
+        lines = ["CRITERIA:", "*" * 9]
+        for tag in _LEFT_HUD_TAGS:
+            n1 = rng.randint(100, 999)
+            n2 = rng.randint(10000, 99999)
+            lines.append(f"{n1} {tag}  {n2}")
+        header = "CRIT"
+
+    elif mode == 2:
+        rng = random.Random(int(tick / 3.0))
+        lines = ["ANALYSIS:  MATCH:", "*" * 15]
+        for tag in _LEFT_HUD_TAGS_EXT:
+            n1 = rng.randint(100, 999)
+            n2 = rng.randint(10000, 99999)
+            lines.append(f"{n1} {tag}  {n2}")
+        assess = "ASSESS: SUITABLE" if rng.random() > 0.3 else "ASSESS: POSSIBLE"
+        lines.append(assess)
+        header = "ANAL"
+
+    elif mode == 3:
+        rng = random.Random(int(tick / 1.1))
+        lines = ["*" * 15]
+        # skupina 1
+        for _ in range(5):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        lines.append("")  # prázdný řádek
+        # skupina 2
+        for _ in range(3):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        header = "****"
+
+    else:
+        rng = random.Random(int(tick / 2.0))
+        prob = round(rng.uniform(0.85, 0.99), 2)
+        level = rng.randint(10000, 99999)
+        lines = [
+            "VISUAL ASSESSMENT:",
+            f"LEVEL {level} SCAN",
+            "PROBABILITY OF",
+            "CAMOUFLAGE",
+            f"ACQUISITION: {prob}",
+            "BEARING",
+            "*" * 13,
+        ]
+        for _ in range(5):
+            a = rng.randint(100000, 999999)
+            b = rng.randint(100, 999)
+            c = rng.randint(10, 99)
+            lines.append(f"{a} {b} {c}")
+        header = "VISU"
+
+    panel_h = len(lines) * line_h + 10
+    panel_w = 270
 
     pos_seed = int(tick / 10)
     pos_rng  = random.Random(pos_seed)
@@ -429,13 +630,13 @@ def draw_scan_levels(img: np.ndarray, tick: float) -> None:
     px = pos_rng.randint(x_min, x_max)
     py = pos_rng.randint(y_min, y_max)
 
-    bg = img.copy()
-    cv2.rectangle(bg, (px - 4, py - 4), (px + panel_w, py + panel_h), (0, 0, 0), -1)
-    cv2.addWeighted(bg, 0.45, img, 0.55, 0, img)
+    # typewriter efekt – řádky se zobrazují postupně od začátku každého módu
+    mode_start = int(tick / _LEFT_HUD_SWITCH) * _LEFT_HUD_SWITCH
+    elapsed    = tick - mode_start
+    visible    = max(1, int(elapsed / 0.18))   # nový řádek každých 0.18 s
 
-    for i, line in enumerate(lines):
-        color = RED_TEXT if line.startswith("SCAN") else RED_DIM
-        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, color)
+    for i, line in enumerate(lines[:visible]):
+        put_text_outlined(img, line, (px, py + (i + 1) * line_h), font_scale, RED_TEXT)
 
 
 def draw_search_criteria(img: np.ndarray, tick: float) -> None:
@@ -587,8 +788,7 @@ def draw_global_hud(img: np.ndarray, fps: float, det_count: int, frame_no: int) 
 
     # horní řádek
     put_text_outlined(img, "CYBERDYNE SYSTEMS  MODEL 101", (10, 22), FONT_SM, RED_TEXT)
-    tw, _ = cv2.getTextSize(now_str, FONT, FONT_SM, 1)[0], None
-    tw = cv2.getTextSize(now_str, FONT, FONT_SM, 1)[0][0]
+    tw = get_text_width(now_str, FONT_SM)
     put_text_outlined(img, now_str, (w - tw - 10, 22), FONT_SM, RED_TEXT)
 
     # dolní řádek
@@ -597,9 +797,9 @@ def draw_global_hud(img: np.ndarray, fps: float, det_count: int, frame_no: int) 
     targets_str = f"TARGETS: {det_count}"
 
     put_text_outlined(img, fps_str,     (10, h - 10), FONT_SM, RED_TEXT)
-    ctw = cv2.getTextSize(center_str, FONT, FONT_SM, 1)[0][0]
+    ctw = get_text_width(center_str, FONT_SM)
     put_text_outlined(img, center_str,  ((w - ctw) // 2, h - 10), FONT_SM, RED_TEXT)
-    ttw = cv2.getTextSize(targets_str, FONT, FONT_SM, 1)[0][0]
+    ttw = get_text_width(targets_str, FONT_SM)
     put_text_outlined(img, targets_str, (w - ttw - 10, h - 10), FONT_SM, RED_TEXT)
 
 
@@ -669,7 +869,7 @@ def draw_detection(img: np.ndarray, det: dict, frame_shape: tuple,
 
     line_h = 16
     box_h  = len(lines) * line_h + 6
-    box_w  = max(cv2.getTextSize(l, FONT, FONT_SM, 1)[0][0] for l in lines) + 10
+    box_w  = max(get_text_width(l, FONT_SM) for l in lines) + 10
 
     if y1 - box_h - 4 >= 0:
         bx1, by1 = x1, y1 - box_h - 4
@@ -907,6 +1107,9 @@ def main():
         for det in cached_detections:
             draw_detection(overlay, det, frame.shape, tick, debug=debug_mode)
 
+        # vykreslí text na overlay (PIL – jedna konverze)
+        flush_text(overlay)
+
         # zkombinuj overlay s filtrovaným framem (85/15)
         out = cv2.addWeighted(overlay, 0.85, filtered, 0.15, 0)
 
@@ -918,12 +1121,15 @@ def main():
             fps_timer = tick
 
         draw_global_hud(out, fps, len(cached_detections), frame_no)
-        draw_scan_levels(out, tick)
+        draw_left_hud(out, tick)
         draw_compass_rose(out, tick)
-        draw_scan_panel(out, tick)
+        draw_right_hud(out, tick)
         draw_search_criteria(out, tick)
 
         draw_camera_viewfinder(out, tick)
+
+        # vykreslí text na out (PIL – jedna konverze)
+        flush_text(out)
 
         # ---------------------------------------------------------------
         # Zvukové události
