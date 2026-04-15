@@ -767,10 +767,12 @@ def main():
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
-    fullscreen = False
+    fullscreen = True
     debug_mode = False
     WIN_NAME   = "Terminator Vision"
-    cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(WIN_NAME, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(WIN_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
 
     frame_no        = 0
     fps             = 0.0
