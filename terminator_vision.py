@@ -747,10 +747,10 @@ def main():
     parser.add_argument("--height", type=int, default=480, help="Výška obrazu")
     args = parser.parse_args()
 
-    # inicializace zvuku
+    # inicializace zvuku – defaultně vypnutý
     sound = SoundEngine()
-    sound.play_startup()
-    sound.start_ambient()
+    sound.enabled = False
+    sound_on = False
 
     # inicializace modelu
     model = YOLO("yolov8n-seg.pt")
@@ -948,13 +948,21 @@ def main():
         if key == ord('q'):
             break
         elif key == ord('s'):
+            sound_on = not sound_on
+            sound.enabled = sound_on
+            if sound_on:
+                sound.start_ambient()
+                print("[INFO] Zvuk: ZAP")
+            else:
+                sound.stop()
+                print("[INFO] Zvuk: VYP")
+        elif key == ord('p'):
             ts  = datetime.now().strftime("%H%M%S")
             fn  = f"terminator_{ts}.png"
             cv2.imwrite(fn, out)
             print(f"[INFO] Screenshot uložen: {fn}")
         elif key == ord('f'):
             fullscreen = not fullscreen
-            prop = cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL
             cv2.setWindowProperty(WIN_NAME, cv2.WND_PROP_FULLSCREEN,
                                   cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
         elif key == ord('d'):
