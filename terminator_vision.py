@@ -169,33 +169,36 @@ def _get_font_mv() -> ImageFont.FreeTypeFont:
 # ---------------------------------------------------------------------------
 # Terminálové zprávy – T2 HUD typewriter (střed dolní třetiny)
 # ---------------------------------------------------------------------------
-TERMINAL_MESSAGES: list[str] = [
-    "SCANNING",
-    "MATCH FOUND",
-    "SEARCHING",
-    "TARGET ACQUIRED",
-    "ANALYZING THREAT",
-    "IDENTIFY",
-    "ACCESSING",
-    "PATTERN MATCH",
-    "THREAT ASSESSMENT",
-    "VOICE PRINT MATCH",
-    "POSITIVE ID",
-    "ACQUIRING TARGET",
-    "CPU SCAN COMPLETE",
-    "ESTIMATED RISK: HIGH",
-    "SUBJECT IDENTIFIED",
-    "INITIATING SEQUENCE",
-    "TRACKING ACTIVE",
-    "WEAPONS CHECK",
-    "DECISION: ACQUIRE",
-    "FILE FOUND",
-    "ANALYSIS COMPLETE",
-    "WANT AND WARRANT: NONE",
-    "DATABANK ACCESSED",
-    "POSSIBLE MATCH",
-    "ALERT: MULTIPLE TARGETS",
+_TERMINAL_MESSAGES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "terminal_messages.txt"
+)
+_TERMINAL_MESSAGES_FALLBACK: list[str] = [
+    "SCANNING", "MATCH FOUND", "SEARCHING", "TARGET ACQUIRED",
+    "ANALYZING THREAT", "IDENTIFY", "ACCESSING", "PATTERN MATCH",
 ]
+
+
+def _load_terminal_messages() -> list[str]:
+    """Načte zprávy z terminal_messages.txt (jeden řádek = jedna zpráva).
+    Prázdné řádky a řádky začínající # jsou ignorovány.
+    Pokud soubor neexistuje, vrátí fallback seznam."""
+    try:
+        with open(_TERMINAL_MESSAGES_FILE, encoding="utf-8") as f:
+            msgs = [
+                line.strip()
+                for line in f
+                if line.strip() and not line.startswith("#")
+            ]
+        if msgs:
+            print(f"[INFO] Načteno {len(msgs)} terminálových zpráv z {_TERMINAL_MESSAGES_FILE}")
+            return msgs
+        print(f"[WARN] {_TERMINAL_MESSAGES_FILE} je prázdný, používám fallback.")
+    except FileNotFoundError:
+        print(f"[WARN] {_TERMINAL_MESSAGES_FILE} nenalezen, používám fallback.")
+    return _TERMINAL_MESSAGES_FALLBACK
+
+
+TERMINAL_MESSAGES: list[str] = _load_terminal_messages()
 
 _TW_CHAR_DELAY  = 0.055   # sekund na jeden znak
 _TW_ERASE_WAIT  = 2.0     # sekund čekání po dopsání před smazáním
@@ -266,7 +269,7 @@ def flush_text(img: np.ndarray) -> None:
             if cursor_visible:
                 tw = fmv.getbbox(text)[2] if text else 0
                 cx0 = x + tw + cw          # přeskočí jedno "prázdné" místo
-                draw.rectangle([cx0, py, cx0 + cw, py + ch], fill=(255, 255, 255))
+                draw.rectangle([cx0, py + 10, cx0 + cw - 20, py + ch - 30 + 10], fill=(255, 255, 255))
 
     img[:, :, :] = np.array(pil)[:, :, ::-1]
     _text_queue = [(i, t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i != tid]
@@ -329,7 +332,7 @@ def draw_terminal_text(img: np.ndarray, tick: float) -> None:
     y = h * 5 // 6                      # střed dolní třetiny (baseline)
 
     # kurzor bliká 2× za sekundu; v pause fázi nezobrazujeme
-    cursor_visible = (_tw["state"] == "typing") and (int(tick * 2) % 2 == 0)
+    cursor_visible = (_tw["state"] in ("typing", "pause")) and (int(tick * 2) % 2 == 0)
 
     _mv_queue.append((id(img), typed, x, y, cursor_visible))
 
@@ -663,7 +666,7 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
     cy = int(h / 2 + margin_y * np.sin(tick * 0.47 + 1.1))
 
     r_outer = int(min(w, h) * 0.080)  # ~8 % kratší strany
-    r_inner = int(r_outer * 0.38)
+    r_inner = int(r_outer * 0.38) + 20
     col     = RED_TEXT
     col_dim = RED_DIM
 
@@ -678,30 +681,20 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
     roi       = img[ry1:ry2, rx1:rx2]
     layer_roi = roi.copy()
 
-    # bílý fill a pulzující kruh – jen do ROI (souřadnice relativní)
+    # ---- bílý fill (alpha blend přes ROI) ----------------------------
+    original_roi = roi.copy()   # originál před blendem – pro průhledné čáry
     cv2.circle(layer_roi, (cx - rx1, cy - ry1), r_outer, (255, 255, 255), -1)
-    cv2.circle(layer_roi, (cx - rx1, cy - ry1), pulse,   col_dim, 1, cv2.LINE_AA)
-    cv2.addWeighted(layer_roi, 0.25, roi, 0.75, 0, roi)
+    cv2.addWeighted(layer_roi, 0.45, roi, 0.55, 0, roi)
 
-    # ---- vnitřní kruh -------------------------------------------------
-    cv2.circle(img, (cx, cy), r_inner, (60, 60, 60), 1, cv2.LINE_AA)
-
-    # ---- tenký vertikální kříž (jen uvnitř vnitřního kruhu) -----------
-    cv2.line(img, (cx, cy - r_inner), (cx, cy + r_inner), (80, 80, 80), 1, cv2.LINE_AA)
-
-    # ---- centrální tečka ----------------------------------------------
-    cv2.circle(img, (cx, cy), 2, (40, 40, 40), -1, cv2.LINE_AA)
-
-    # ---- vnější kruh s tick marks ------------------------------------
-    cv2.circle(img, (cx, cy), r_outer, col, 1, cv2.LINE_AA)
-    for deg in range(0, 360, 45):
-        a    = np.radians(deg)
-        tlen = 9 if deg % 90 == 0 else 5
-        xo = int(cx + r_outer          * np.cos(a))
-        yo = int(cy + r_outer          * np.sin(a))
-        xi = int(cx + (r_outer - tlen) * np.cos(a))
-        yi = int(cy + (r_outer - tlen) * np.sin(a))
-        cv2.line(img, (xi, yi), (xo, yo), col, 1, cv2.LINE_AA)
+    # ---- čáry jako výřez z bílého fillu – 100% průhledné -------------
+    lx, ly = cx - rx1, cy - ry1   # střed v souřadnicích ROI
+    line_mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+    cv2.circle(line_mask, (lx, ly), r_inner, 255, 1, cv2.LINE_AA)
+    cv2.line(line_mask, (lx - r_inner, ly), (lx + r_inner, ly), 255, 1, cv2.LINE_AA)
+    cv2.circle(line_mask, (lx, ly), 2, 255, -1, cv2.LINE_AA)
+    cv2.line(line_mask, (lx, ly - r_outer), (lx, ly - r_inner), 255, 1, cv2.LINE_AA)
+    cv2.line(line_mask, (lx, ly + r_inner), (lx, ly + r_outer), 255, 1, cv2.LINE_AA)
+    roi[line_mask > 0] = original_roi[line_mask > 0]
 
 
 def _draw_compass_rose_at(img: np.ndarray, cx: int, cy: int, r: int) -> None:
