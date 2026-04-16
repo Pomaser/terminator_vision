@@ -148,37 +148,190 @@ def get_text_width(text: str, scale: float) -> int:
     return bbox[2] - bbox[0]
 
 
-# Fronta textových příkazů: (array_id, text, x, y, scale, bgr_color)
+# ---------------------------------------------------------------------------
+# PIL font – Modern Vision (terminálový typewriter)
+# ---------------------------------------------------------------------------
+_FONT_MV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "font", "modern-vision.ttf")
+_FONT_MV_SIZE = 100
+_font_mv: ImageFont.FreeTypeFont | None = None
+
+def _get_font_mv() -> ImageFont.FreeTypeFont:
+    global _font_mv
+    if _font_mv is None:
+        try:
+            _font_mv = ImageFont.truetype(_FONT_MV_PATH, _FONT_MV_SIZE)
+        except Exception:
+            _font_mv = _get_font(0.65)
+    return _font_mv
+
+
+# ---------------------------------------------------------------------------
+# Terminálové zprávy – T2 HUD typewriter (střed dolní třetiny)
+# ---------------------------------------------------------------------------
+TERMINAL_MESSAGES: list[str] = [
+    "SCANNING",
+    "MATCH FOUND",
+    "SEARCHING",
+    "TARGET ACQUIRED",
+    "ANALYZING THREAT",
+    "IDENTIFY",
+    "ACCESSING",
+    "PATTERN MATCH",
+    "THREAT ASSESSMENT",
+    "VOICE PRINT MATCH",
+    "POSITIVE ID",
+    "ACQUIRING TARGET",
+    "CPU SCAN COMPLETE",
+    "ESTIMATED RISK: HIGH",
+    "SUBJECT IDENTIFIED",
+    "INITIATING SEQUENCE",
+    "TRACKING ACTIVE",
+    "WEAPONS CHECK",
+    "DECISION: ACQUIRE",
+    "FILE FOUND",
+    "ANALYSIS COMPLETE",
+    "WANT AND WARRANT: NONE",
+    "DATABANK ACCESSED",
+    "POSSIBLE MATCH",
+    "ALERT: MULTIPLE TARGETS",
+]
+
+_TW_CHAR_DELAY  = 0.055   # sekund na jeden znak
+_TW_ERASE_WAIT  = 2.0     # sekund čekání po dopsání před smazáním
+
+# Stav typewriteru – persistentní mezi framy
+# state: "idle" | "typing" | "pause"
+_tw: dict = {
+    "state":        "idle",
+    "msg":           0,
+    "chars":         0,
+    "last_tick":     0.0,
+    "pause_until":   0.0,
+    "cooldown_until": 0.0,   # random 5–10 s prodleva před dalším textem
+}
+_tw_triggered: bool = False   # True = nová detekce, spustit další zprávu
+
+
+def terminal_trigger() -> None:
+    """Zavolej když je detekován nový objekt – spustí další zprávu."""
+    global _tw_triggered
+    _tw_triggered = True
+
+
+# ---------------------------------------------------------------------------
+# Fronta textových příkazů
+# ---------------------------------------------------------------------------
+
+# Hlavní fronta: (array_id, text, x, y, scale, bgr_color)
 _text_queue: list = []
+# MV fronta:    (array_id, typed_text, x, y, cursor_visible)
+_mv_queue:    list = []
 
 
 def flush_text(img: np.ndarray) -> None:
-    """Vykreslí všechny čekající texty pro daný array jedinou PIL konverzí."""
-    global _text_queue
+    """Vykreslí všechny čekající texty (obě fronty) jedinou PIL konverzí."""
+    global _text_queue, _mv_queue
     tid = id(img)
-    items = [(t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i == tid]
-    if not items:
+    items    = [(t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i == tid]
+    mv_items = [(t, x, y, v)    for (i, t, x, y, v)    in _mv_queue    if i == tid]
+    if not items and not mv_items:
         return
-    pil = Image.fromarray(img[:, :, ::-1])   # BGR → RGB
+    pil  = Image.fromarray(img[:, :, ::-1])
     draw = ImageDraw.Draw(pil)
+
+    # Helvetica texty
     for text, x, y, scale, bgr in items:
         font   = _get_font(scale)
         ascent = font.getmetrics()[0]
-        py     = y - ascent                  # OpenCV baseline → PIL top-left
+        py     = y - ascent
         rgb    = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
         for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
             draw.text((x + dx, py + dy), text, font=font, fill=(0, 0, 0))
         draw.text((x, py), text, font=font, fill=rgb)
-    img[:, :, :] = np.array(pil)[:, :, ::-1]  # RGB → BGR
+
+    # Modern Vision typewriter texty + blokový kurzor
+    if mv_items:
+        fmv             = _get_font_mv()
+        ascent, descent = fmv.getmetrics()
+        ch  = ascent + descent                 # výška kurzoru = plná výška textu
+        cw  = fmv.getbbox("M")[2]             # šířka kurzoru = šířka "M"
+        for text, x, y, cursor_visible in mv_items:
+            py = y - ascent
+            # shadow
+            for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+                draw.text((x + dx, py + dy), text, font=fmv, fill=(0, 0, 0))
+            draw.text((x, py), text, font=fmv, fill=(255, 255, 255))
+            # blokový kurzor – 2 znaky vpředu, bliká
+            if cursor_visible:
+                tw = fmv.getbbox(text)[2] if text else 0
+                cx0 = x + tw + cw          # přeskočí jedno "prázdné" místo
+                draw.rectangle([cx0, py, cx0 + cw, py + ch], fill=(255, 255, 255))
+
+    img[:, :, :] = np.array(pil)[:, :, ::-1]
     _text_queue = [(i, t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i != tid]
+    _mv_queue   = [(i, t, x, y, v)    for (i, t, x, y, v)    in _mv_queue    if i != tid]
 
 
 def retarget_text(old_img: np.ndarray, new_img: np.ndarray) -> None:
     """Přesměruje čekající texty z old_img na new_img (bez flush)."""
-    global _text_queue
+    global _text_queue, _mv_queue
     oid, nid = id(old_img), id(new_img)
     _text_queue = [(nid if i == oid else i, t, x, y, s, c)
                    for (i, t, x, y, s, c) in _text_queue]
+    _mv_queue   = [(nid if i == oid else i, t, x, y, v)
+                   for (i, t, x, y, v) in _mv_queue]
+
+
+def draw_terminal_text(img: np.ndarray, tick: float) -> None:
+    """Typewriter zprávy ve středu dolní třetiny obrazu s blokovým kurzorem."""
+    global _tw, _tw_triggered
+    h, w = img.shape[:2]
+
+    # ---- state machine ------------------------------------------------
+    if _tw["state"] == "idle":
+        if _tw_triggered and tick >= _tw["cooldown_until"]:
+            _tw["msg"]        = (_tw["msg"] + 1) % len(TERMINAL_MESSAGES)
+            _tw["chars"]      = 0
+            _tw["last_tick"]  = tick
+            _tw["state"]      = "typing"
+            _tw_triggered     = False
+        else:
+            return   # nic nezobrazujeme
+
+    elif _tw["state"] == "typing":
+        msg = TERMINAL_MESSAGES[_tw["msg"]]
+        if _tw["chars"] < len(msg):
+            if tick - _tw["last_tick"] >= _TW_CHAR_DELAY:
+                _tw["chars"]    += 1
+                _tw["last_tick"] = tick
+        else:
+            # text dopsán → čekej 2 s pak smaž
+            _tw["state"]      = "pause"
+            _tw["pause_until"] = tick + _TW_ERASE_WAIT
+
+    elif _tw["state"] == "pause":
+        if tick >= _tw["pause_until"]:
+            _tw["state"]          = "idle"
+            _tw["chars"]          = 0
+            _tw["cooldown_until"] = tick + random.uniform(5.0, 10.0)
+            return   # text smazán, nic nevykreslujeme
+
+    # ---- vykreslení ---------------------------------------------------
+    msg   = TERMINAL_MESSAGES[_tw["msg"]]
+    typed = msg[:_tw["chars"]]
+
+    fmv = _get_font_mv()
+    tw  = fmv.getbbox(typed)[2] if typed else 0
+    cw  = fmv.getbbox("M")[2]
+    total_w = tw + 2 * cw               # text + mezera + kurzor
+    x = (w - total_w) // 2
+    y = h * 5 // 6                      # střed dolní třetiny (baseline)
+
+    # kurzor bliká 2× za sekundu; v pause fázi nezobrazujeme
+    cursor_visible = (_tw["state"] == "typing") and (int(tick * 2) % 2 == 0)
+
+    _mv_queue.append((id(img), typed, x, y, cursor_visible))
 
 # Zóny těla pro částečný mesh (name, y_rel_start, y_rel_end, x_rel_start, x_rel_end)
 BODY_ZONES = [
@@ -1175,6 +1328,7 @@ def main():
         draw_search_criteria(out, tick)
 
         draw_camera_viewfinder(out, tick)
+        draw_terminal_text(out, tick)
 
         # jediný flush_text za frame – PIL konverze proběhne jen jednou
         flush_text(out)
@@ -1186,6 +1340,7 @@ def main():
         if det_count > prev_det_count:
             # nový cíl přibyl
             sound.play_target()
+            terminal_trigger()
         elif det_count >= _ALERT_THRESH and det_count > prev_det_count - 1:
             # stále hodně cílů – alert (jen pokud se count nezmenšil)
             sound.play_alert()
