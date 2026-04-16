@@ -172,6 +172,14 @@ def flush_text(img: np.ndarray) -> None:
     img[:, :, :] = np.array(pil)[:, :, ::-1]  # RGB → BGR
     _text_queue = [(i, t, x, y, s, c) for (i, t, x, y, s, c) in _text_queue if i != tid]
 
+
+def retarget_text(old_img: np.ndarray, new_img: np.ndarray) -> None:
+    """Přesměruje čekající texty z old_img na new_img (bez flush)."""
+    global _text_queue
+    oid, nid = id(old_img), id(new_img)
+    _text_queue = [(nid if i == oid else i, t, x, y, s, c)
+                   for (i, t, x, y, s, c) in _text_queue]
+
 # Zóny těla pro částečný mesh (name, y_rel_start, y_rel_end, x_rel_start, x_rel_end)
 BODY_ZONES = [
     ("HEAD",        0.00, 0.20, 0.22, 0.78),
@@ -198,13 +206,19 @@ SCAN_ACQUIRES = [
 # Obrazové filtry
 # ---------------------------------------------------------------------------
 
+# LUT tabulky pro červený filtr – předpočítány jednou při importu
+_lut_b = np.clip(np.arange(256, dtype=np.float32) * 0.08,       0, 255).astype(np.uint8)
+_lut_g = np.clip(np.arange(256, dtype=np.float32) * 0.25,       0, 255).astype(np.uint8)
+_lut_r = np.clip(np.arange(256, dtype=np.float32) * 1.3 + 20,   0, 255).astype(np.uint8)
+
+
 def apply_red_filter(frame: np.ndarray) -> np.ndarray:
-    """Boost R, potlač G a B – terminator červený pohled."""
-    f = frame.astype(np.float32)
-    f[:, :, 0] = np.clip(f[:, :, 0] * 0.08,          0, 255)  # B
-    f[:, :, 1] = np.clip(f[:, :, 1] * 0.25,          0, 255)  # G
-    f[:, :, 2] = np.clip(f[:, :, 2] * 1.3 + 20,      0, 255)  # R
-    return f.astype(np.uint8)
+    """Boost R, potlač G a B – LUT (bez float32 konverzí)."""
+    out = frame.copy()
+    out[:, :, 0] = cv2.LUT(frame[:, :, 0], _lut_b)
+    out[:, :, 1] = cv2.LUT(frame[:, :, 1], _lut_g)
+    out[:, :, 2] = cv2.LUT(frame[:, :, 2], _lut_r)
+    return out
 
 
 def apply_scanlines(frame: np.ndarray) -> np.ndarray:
@@ -229,11 +243,23 @@ def apply_vignette(frame: np.ndarray) -> np.ndarray:
     return np.clip(frame.astype(np.float32) * v[:, :, np.newaxis], 0, 255).astype(np.uint8)
 
 
-def add_noise(frame: np.ndarray) -> np.ndarray:
-    """Per-pixel náhodný šum ±6."""
-    noise = np.random.randint(-6, 7, frame.shape, dtype=np.int16)
-    out = np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    return out
+# Pool předgenerovaných šumových polí – inicializuje se jednou v main()
+_noise_pool: list = []
+
+
+def _init_noise_pool(h: int, w: int, n: int = 30) -> None:
+    """Předgeneruje n šumových polí pro add_noise."""
+    global _noise_pool
+    _noise_pool = [
+        np.random.randint(-6, 7, (h, w, 3), dtype=np.int8)
+        for _ in range(n)
+    ]
+
+
+def add_noise(frame: np.ndarray, frame_no: int) -> np.ndarray:
+    """Per-pixel šum ±6 – z předgenerovaného poolu (bez alokace za frame)."""
+    noise = _noise_pool[frame_no % len(_noise_pool)]
+    return np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -488,9 +514,21 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
     col     = RED_TEXT
     col_dim = RED_DIM
 
-    # ---- poloprůhledný bílý fill kruhu --------------------------------
-    layer = img.copy()
-    cv2.circle(layer, (cx, cy), r_outer, (255, 255, 255), -1)
+    # ---- pulzující rádius (potřebujeme ho brzy) ----------------------
+    pulse = int(r_outer * 1.30 + r_outer * 0.06 * np.sin(tick * 3.2))
+
+    # ---- ROI pro alpha blend – jen oblast kolem kruhu ----------------
+    rx1 = max(0, cx - pulse - 2)
+    ry1 = max(0, cy - pulse - 2)
+    rx2 = min(w,  cx + pulse + 2)
+    ry2 = min(h,  cy + pulse + 2)
+    roi       = img[ry1:ry2, rx1:rx2]
+    layer_roi = roi.copy()
+
+    # bílý fill a pulzující kruh – jen do ROI (souřadnice relativní)
+    cv2.circle(layer_roi, (cx - rx1, cy - ry1), r_outer, (255, 255, 255), -1)
+    cv2.circle(layer_roi, (cx - rx1, cy - ry1), pulse,   col_dim, 1, cv2.LINE_AA)
+    cv2.addWeighted(layer_roi, 0.25, roi, 0.75, 0, roi)
 
     # ---- vnitřní kruh -------------------------------------------------
     cv2.circle(img, (cx, cy), r_inner, (60, 60, 60), 1, cv2.LINE_AA)
@@ -511,11 +549,6 @@ def draw_camera_viewfinder(img: np.ndarray, tick: float) -> None:
         xi = int(cx + (r_outer - tlen) * np.cos(a))
         yi = int(cy + (r_outer - tlen) * np.sin(a))
         cv2.line(img, (xi, yi), (xo, yo), col, 1, cv2.LINE_AA)
-
-    # ---- pulzující vnější kruh – do stejného layer jako fill ---------
-    pulse = int(r_outer * 1.30 + r_outer * 0.06 * np.sin(tick * 3.2))
-    cv2.circle(layer, (cx, cy), pulse, col_dim, 1, cv2.LINE_AA)
-    cv2.addWeighted(layer, 0.25, img, 0.75, 0, img)
 
 
 def _draw_compass_rose_at(img: np.ndarray, cx: int, cy: int, r: int) -> None:
@@ -1000,6 +1033,14 @@ def main():
     _SCAN_INTERVAL = 4.0   # sekundy mezi scan zvuky
     _ALERT_THRESH  = 3     # počet cílů pro alert
 
+    # inicializuj noise pool po prvním přečtení rozlišení
+    ret0, frame0 = cap.read()
+    if not ret0:
+        print("[ERR] Nelze číst první frame.", file=sys.stderr)
+        sys.exit(1)
+    _init_noise_pool(frame0.shape[0], frame0.shape[1])
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)   # vrať se na začátek (pro video i kameru)
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -1084,7 +1125,7 @@ def main():
         # ---------------------------------------------------------------
         filtered = apply_red_filter(frame)
         filtered = apply_vignette(filtered)
-        filtered = add_noise(filtered)
+        filtered = add_noise(filtered, frame_no)
 
         # ---------------------------------------------------------------
         # Kresli overlay – pracuj na kopii pro alpha blend
@@ -1115,11 +1156,11 @@ def main():
         for det in cached_detections:
             draw_detection(overlay, det, frame.shape, tick, debug=debug_mode)
 
-        # vykreslí text na overlay (PIL – jedna konverze)
-        flush_text(overlay)
-
         # zkombinuj overlay s filtrovaným framem (85/15)
         out = cv2.addWeighted(overlay, 0.85, filtered, 0.15, 0)
+
+        # přesměruj čekající texty z overlay na out (bez další konverze)
+        retarget_text(overlay, out)
 
         # globální HUD přímo na výsledný obraz
         fps_frame_count += 1
@@ -1135,7 +1176,7 @@ def main():
 
         draw_camera_viewfinder(out, tick)
 
-        # vykreslí text na out (PIL – jedna konverze)
+        # jediný flush_text za frame – PIL konverze proběhne jen jednou
         flush_text(out)
 
         # ---------------------------------------------------------------
