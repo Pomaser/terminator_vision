@@ -1185,6 +1185,9 @@ def main():
     _OBJ_CYCLE_SECS  = 5.0   # sekund mezi přepnutím skupiny objektů
     _obj_state       = [0.0, 0]   # [last_cycle_tick, offset]
 
+    # filtr velikosti bbox: objekty s plochou > X % plochy framu se ignorují
+    MAX_BBOX_AREA_RATIO = 0.40   # 0.0–1.0; 0.40 = max 40 % plochy framu
+
     # inicializuj noise pool po prvním přečtení rozlišení
     ret0, frame0 = cap.read()
     if not ret0:
@@ -1229,6 +1232,12 @@ def main():
                     det = dict(x1=x1, y1=y1, x2=x2, y2=y2,
                                conf=conf_val, label=lbl, idx=i,
                                mask_xy=None)
+
+                    # přeskoč objekty jejichž bbox překračuje MAX_BBOX_AREA_RATIO
+                    frame_area = frame.shape[0] * frame.shape[1]
+                    bbox_area  = max(0, x2 - x1) * max(0, y2 - y1)
+                    if frame_area > 0 and bbox_area / frame_area > MAX_BBOX_AREA_RATIO:
+                        continue
 
                     mask_bin = None
                     if masks is not None and i < len(masks.xy):
