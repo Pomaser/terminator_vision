@@ -1,31 +1,34 @@
-# Terminator Vision – dokumentace projektu
+# CLAUDE.md
 
-## Cíl
-Python aplikace `terminator_vision.py` simulující červené HUD vidění Terminátora T-800 z filmu T2. Detekuje osoby a objekty přes YOLOv8-seg a zobrazuje je s T2-style overlay.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ---
 
-## Závislosti
+## Projekt
 
-```
-pip install opencv-python ultralytics numpy pillow pygame
-```
-
-- Model `yolov8n-seg.pt` se stáhne automaticky při prvním spuštění.
-- Font HUD: `font/Helvetica73-Extended Bold.ttf`
-- Font terminál: `font/modern-vision.ttf` (100 px, typewriter dolní třetina)
-- Zvuky (volitelné): `sounds/{startup,ambient,target,new_target,scan,alert}.wav`
+Python aplikace `terminator_vision.py` – T-800 HUD simulace z T2 přes webcam/video. YOLOv8-seg detekce osob a objektů, bílý overlay na filtrovaném obrazu.
 
 ---
 
 ## Spuštění
 
 ```bash
-python terminator_vision.py                                  # výchozí kamera
-python terminator_vision.py --camera 1                       # jiný index
-python terminator_vision.py --width 1280 --height 720
-python terminator_vision.py --source sample/Terminator.mkv  # video soubor
+python3.14 terminator_vision.py --source sample/sample.mp4   # video soubor
+python3.14 terminator_vision.py                               # výchozí kamera
+python3.14 terminator_vision.py --camera 1 --width 1280 --height 720
 ```
+
+**Syntaktická kontrola** (bez spuštění):
+```bash
+python3.14 -c "import ast; ast.parse(open('terminator_vision.py').read()); print('OK')"
+```
+
+**Závislosti:**
+```bash
+python3.14 -m pip install opencv-python ultralytics numpy pillow pygame
+```
+
+Model `yolov8n-seg.pt` se stáhne automaticky při prvním spuštění.
 
 ---
 
@@ -33,235 +36,148 @@ python terminator_vision.py --source sample/Terminator.mkv  # video soubor
 
 | Klávesa | Akce |
 |---------|------|
-| `q` | Ukončit aplikaci |
+| `q` | Ukončit |
 | `s` | Screenshot → `terminator_HHMMSS.png` |
-| `f` | Přepnout fullscreen |
-| `d` | Debug info (raw YOLO boxy) |
+| `f` | Fullscreen |
+| `d` | Debug (raw YOLO boxy) |
 | `S` | Zapnout/vypnout zvuk (default: vypnuto) |
+
+---
+
+## Soubory projektu
+
+| Soubor | Účel |
+|--------|------|
+| `terminator_vision.py` | Celá aplikace (jediný zdrojový soubor) |
+| `terminal_messages.txt` | Zprávy pro terminálový typewriter, jeden řádek = jedna zpráva, `#` = komentář |
+| `font/Helvetica73-Extended Bold.ttf` | Font HUD panelů |
+| `font/modern-vision.ttf` | Font terminálového typewriteru (100 px) |
+| `sounds/*.wav` | Zvuky: startup, ambient, target, new_target, scan, alert |
+| `sample/sample.mp4` | Referenční video pro vývoj bez kamery |
 
 ---
 
 ## Barevné schéma
 
-Veškerý overlay je **bílý** (ne červený):
+Veškerý overlay je **bílý**:
 - `RED_TEXT = (255, 255, 255)` — hlavní bílá
 - `RED_DIM  = (160, 160, 160)` — tlumená šedá
 
----
-
-## Obrazové filtry (pořadí na každý frame)
-
-1. **Červený filtr** – LUT tabulky (`_lut_b/g/r`), bez float32 konverzí
-2. **Vignette** – Gaussovský gradient, cachováno per rozlišení
-3. **Šum** – pool 30 předgenerovaných polí, `_init_noise_pool()` při startu
-
-> Scanlines a globální mřížka přes celý obraz byly odstraněny.
+Při přidávání nových prvků používej výhradně tyto konstanty, ne hardcoded barvy.
 
 ---
 
-## Detekce objektů
+## Architektura hlavní smyčky
 
-- `YOLO("yolov8n-seg.pt")`, `conf=0.40`
-- Každý **2. frame** se spouští inference, výsledky se kešují
-- Extrahuje: `boxes.xyxy`, `boxes.conf`, `boxes.cls`, `masks.xy`, `masks.data`
-
----
-
-## PIL textový systém
-
-Všechny texty se renderují přes Pillow, **jedinou PIL konverzí za frame**.
-
-### Dvě fronty:
-- `_text_queue` – Helvetica 73 Extended Bold (veškerý HUD text)
-- `_mv_queue`   – Modern Vision 100 px (terminálový typewriter)
-
-### Klíčové funkce:
-```python
-put_text_outlined(img, text, pos, font_scale, color)  # přidá do _text_queue
-flush_text(img)       # jediný call za frame – flushuje obě fronty najednou
-retarget_text(overlay, out)  # přesměruje fronty po addWeighted blend
+```
+cap.read() → apply_red_filter → apply_vignette → add_noise
+    ↓
+overlay = filtered.copy()
+    ↓
+[YOLO inference každý 2. frame, výsledky v cached_detections]
+    ↓
+Výběr max. 3 viditelných detekcí (priority: osoby, rotace objektů 2 s)
+    ↓
+draw_segmentation_outline + _draw_triangles + put_text_outlined  → overlay
+    ↓
+out = cv2.addWeighted(overlay, 0.85, filtered, 0.15, 0)
+retarget_text(overlay, out)   ← přesměruje textovou frontu
+    ↓
+draw_global_hud + draw_left_hud + draw_right_hud + draw_search_criteria
+draw_camera_viewfinder + draw_terminal_text  → out
+    ↓
+flush_text(out)   ← jediná PIL konverze za frame (flushuje obě fronty)
+    ↓
+cv2.imshow
 ```
 
-> `flush_text(out)` se volá **jednou** na úplném konci framové smyčky.
-> Před tím se volá `retarget_text(overlay, out)` aby texty z overlay fáze
-> skončily ve správném cílovém bufferu.
+---
+
+## PIL textový systém – kritická pravidla
+
+Všechny texty jdou přes fronty, PIL konverze proběhne **jednou za frame**:
+
+```python
+put_text_outlined(img, text, pos, font_scale, color)  # → _text_queue (Helvetica)
+# MV font se přidává přes _mv_queue v draw_terminal_text (interně)
+flush_text(out)      # volat JEDNOU, na konci framové smyčky
+retarget_text(overlay, out)  # volat po addWeighted, před flush_text
+```
+
+**Nesmí** se volat `flush_text` vícekrát za frame – způsobí duplicitní PIL konverzi.
 
 ---
 
-## Segmentační obrys (`draw_segmentation_outline`)
+## Detekce a výběr objektů
 
-- Polygon z `masks.xy[i]` → `cv2.polylines`
-- `person`: bílý obrys (255,255,255), tloušťka 2, glow halo (80,80,80) tloušťka 5
-- ostatní: šedý obrys (180,180,180), glow (60,60,60)
-
----
-
-## Mesh overlay – Delaunay triangulace (`draw_mesh_overlay`)
-
-- Binární maska z `masks.data[i]` → vzorkování bodů uvnitř masky
-- `cv2.Subdiv2D` triangulace, filtr středem trojúhelníku uvnitř masky
-- **Částečné skenování těla** – `BODY_ZONES` cykluje po 0.7 s:
-  `HEAD, TORSO, LEFT ARM, RIGHT ARM, LEFT LEG, RIGHT LEG`
-- Trojúhelníky se **cachují** (přepočítávají jen každých 0.5 s)
-- `person`: 150 bodů, (200,200,200); ostatní: 80 bodů, (140,140,140)
+- YOLO inference každý **2. frame**, výsledky cachované v `cached_detections`
+- Max. **3 objekty** současně: priority mají osoby, non-person objekty rotují po 2 s
+- Stav rotace: `_obj_state = [last_cycle_tick, offset]` v `main()`
+- Mesh trojúhelníky se přepočítávají každých **0.5 s** a cachují v `mesh_points_cache`
 
 ---
 
-## HUD overlay – globální (`draw_global_hud`)
+## HUD panely – pozice
 
-- Rohové závorky ve 4 rozích obrazu
-- Nahoře vlevo: `CYBERDYNE SYSTEMS MODEL 101`
-- Nahoře vpravo: čas `HH:MM:SS`
-- Dole vlevo: `FPS: XX.X`
-- Dole uprostřed: `NEURAL NET PROCESSOR :: ACTIVE`
-- Dole vpravo: `TARGETS: N`
+Obě panely se pohybují každých 10 s (seeded random, různé seedy):
 
----
-
-## HUD overlay – detekce (`draw_detection`)
-
-1. Rohové závorky kolem bounding boxu
-2. Čárkovaná linie do středu obrazu (pouze osoby, ~30 % alpha)
-3. Info box: třída, `CONF: XX%`, fráze pro osoby, `HEIGHT EST: XXXcm`
-4. Blikající kroužek ve středu bbox (osoby, každých 0.5 s)
+| Panel | Horizontálně | Vertikálně |
+|-------|-------------|------------|
+| `draw_left_hud` | `x` ∈ `[10, w//6]` (max polovina levé třetiny) | střední třetina `[h//3, 2h//3]` |
+| `draw_right_hud` | pravý okraj max na `5w//6` | střední třetina `[h//3, 2h//3]` |
 
 ---
 
-## Levý HUD panel (`draw_left_hud`)
+## Terminálový typewriter
 
-- Pozice: levá třetina, mění se každých 10 s
-- Přepíná **5 módů** po **5 sekundách**
-- Typewriter efekt: nový řádek každých 0.18 s
+Zprávy se načítají ze souboru `terminal_messages.txt` při startu. State machine:
+
+```
+idle ──(terminal_trigger() + cooldown 5–10 s)──► typing ──(celý text)──► pause (2 s) ──► idle
+```
+
+`terminal_trigger()` se volá v `main()` při `det_count > prev_det_count`.
+
+---
+
+## Levý HUD panel – 5 módů (každých 5 s)
 
 | Mód | Obsah |
 |-----|-------|
-| 0 | `SCAN LEVELS:` + skupiny čísel |
-| 1 | `CRITERIA:` + tabulka tagů s čísly |
-| 2 | `ANALYSIS: MATCH:` + rozšířená tabulka + `ASSESS: SUITABLE/POSSIBLE` |
-| 3 | Data dump – dvě skupiny čísel |
-| 4 | `VISUAL ASSESSMENT:` + pravděpodobnost, data |
+| 0 | `SCAN LEVELS:` + čísla |
+| 1 | `CRITERIA:` + tabulka tagů |
+| 2 | `ANALYSIS: MATCH:` + tabulka + `ASSESS` |
+| 3 | Data dump |
+| 4 | `VISUAL ASSESSMENT:` |
 
----
-
-## Pravý HUD panel (`draw_right_hud`)
-
-- Pozice: pravá třetina, mění se každých 10 s
-- Přepíná **6 módů** po **6 sekundách**
-- Typewriter efekt: nový řádek každých 0.18 s
+## Pravý HUD panel – 6 módů (každých 6 s)
 
 | Mód | Obsah |
 |-----|-------|
-| 0 | `SCAN MODE` + tabulka tagů + **12×12 mřížka s pohyblivými osami** |
-| 1 | `ACQUIRE ...` + tabulka tagů |
-| 2 | `PRIORITY XXXXXXXD` + data + `STATUS` |
-| 3 | `DATA DUMP:` + skupiny čísel |
-| 4 | `ENVIRONMENT SCAN:` + teplota, vzdálenost, motion |
-| 5 | Kompasová růžice + `TARGET FIELD:` + 3 × 12 číslic |
-
-### 12×12 mřížka – `_draw_grid_hud` (mód 0)
-- 12 × 12 buněk, každá 22×15 px, celkem 264×180 px
-- Všechny linky bílé
-- Osa X (vodorovná) a Y (svislá) – vlasové bílé čáry, plynulý pohyb po sinusoidách
-  s nesouměřitelnými frekvencemi (0.37 Hz a 0.53 Hz)
-
-### Kompasová růžice – `_draw_compass_rose_at` (mód 5)
-- 8 paprsků ze středu, popisky N/NE/E/SE/S/SW/W/NW vně, bez kruhů
-- Pod růžicí: `TARGET FIELD:` + 3 řady 12místných čísel (mění se každé 4 s)
+| 0 | `SCAN MODE` + tabulka + 12×12 mřížka s plynulými osami |
+| 1 | `ACQUIRE` + tabulka |
+| 2 | `PRIORITY` + data |
+| 3 | `DATA DUMP` |
+| 4 | `ENVIRONMENT SCAN` |
+| 5 | Kompasová růžice + `TARGET FIELD` |
 
 ---
 
-## Terminálový typewriter – `draw_terminal_text`
+## Výkonnostní optimalizace (již implementováno)
 
-Font: **Modern Vision 100 px**. Pozice: střed dolní třetiny obrazu (baseline `y = h * 5 // 6`).
-
-### State machine:
-| Stav | Popis |
-|------|-------|
-| `idle` | Nic se nezobrazuje; čeká na `terminal_trigger()` + cooldown |
-| `typing` | Vypisuje znak po znaku (0.055 s/znak); kurzor bliká 2 Hz |
-| `pause` | 2 s zobrazuje hotový text bez kurzoru; pak přechází do `idle` |
-
-### Cooldown:
-Po smazání textu náhodná prodleva **5–10 s** před dalším spuštěním.
-
-### Trigger:
-```python
-terminal_trigger()   # volá se z main() při det_count > prev_det_count
-```
-
-### Blokový kurzor:
-- Bílý obdélník, šířka `M`, výška = `ascent + descent`
-- Pozice = text width + 2× šířka znaku (jeden prázdný meziprostor)
-- Bliká jen ve stavu `typing`
-
-### Seznam zpráv:
-```python
-TERMINAL_MESSAGES: list[str] = [
-    "SCANNING", "MATCH FOUND", "SEARCHING", "TARGET ACQUIRED", ...
-]
-```
-Uživatel může přidávat vlastní položky.
+| Oblast | Řešení |
+|--------|--------|
+| PIL konverze | `retarget_text` + jediný `flush_text` |
+| Šum | Pool 30 předgenerovaných polí (`_init_noise_pool` při startu) |
+| Červený filtr | LUT tabulky (`_lut_b/g/r`) |
+| Viewfinder | ROI kopie místo celého framu |
+| Mesh | Cache trojúhelníků, přepočet každých 0.5 s |
+| Vignette | Cache masky per rozlišení |
 
 ---
 
 ## Pohyblivý hledáček (`draw_camera_viewfinder`)
 
-- Lissajousův pohyb (frekvence 0.31 a 0.47 Hz)
-- Průměr ~8 % kratší strany obrazu
-- Alpha blend pouze přes ROI oblast kruhu (ne celý frame) – výkon
-
----
-
-## Zvukový engine (`SoundEngine`)
-
-- `pygame.mixer`, zvuky: `startup`, `ambient`, `target`/`new_target`, `scan`, `alert`
-- Default: **vypnuto**; klávesa `S` přepíná
-
----
-
-## Výkonnostní optimalizace
-
-| Oblast | Řešení |
-|--------|--------|
-| PIL konverze | Jedna za frame (`retarget_text` + jediný `flush_text`) |
-| Šum | Pool 30 předgenerovaných polí místo `np.random` za frame |
-| Červený filtr | LUT tabulky místo float32 konverzí |
-| Viewfinder copy | ROI kopie ~64× menší než celý frame |
-| Mesh triangulace | Cache, přepočet jen každých 0.5 s |
-| Vignette | Cache per rozlišení |
-
----
-
-## Struktura funkcí
-
-```
-apply_red_filter(frame)            → frame   (LUT)
-apply_vignette(frame)              → frame   (cachováno)
-add_noise(frame, frame_no)         → frame   (pool)
-_init_noise_pool(h, w)             → None    (volat jednou v main)
-draw_corner_bracket(img, ...)      → None
-draw_segmentation_outline(...)     → None
-sample_points_in_mask(...)         → list
-sample_points_in_zone(...)         → list
-get_zone_bbox(...)                 → tuple
-draw_mesh_overlay(...)             → None
-_compute_triangles(...)            → list
-_draw_triangles(...)               → None
-put_text_outlined(img, ...)        → None    (fronta)
-flush_text(img)                    → None    (PIL render, 1×/frame)
-retarget_text(old, new)            → None
-_get_font_mv()                     → FreeTypeFont
-terminal_trigger()                 → None    (spustí další zprávu)
-draw_terminal_text(img, tick)      → None
-draw_global_grid(img, tick)        → None    (sweep linka)
-_draw_compass_rose_at(img, ...)    → None
-_draw_grid_hud(img, tick, px, py)  → None    (12×12 mřížka)
-draw_left_hud(img, tick)           → None
-draw_right_hud(img, tick)          → None
-draw_center_reticle(img, tick)     → None
-draw_camera_viewfinder(img, tick)  → None
-draw_search_criteria(img, tick)    → None
-draw_detection(img, det, ...)      → None
-draw_global_hud(img, fps, ...)     → None
-main()                             → None
-```
+- Lissajousův pohyb, frekvence 0.31 a 0.47 Hz
+- Čáry uvnitř kruhu jsou **100% průhledné** – implementováno jako výřez z bílého fillu (obnovení originálních pixelů přes `line_mask`)
+- Blend bílého fillu: alpha 0.45
