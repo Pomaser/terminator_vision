@@ -519,10 +519,10 @@ def draw_right_hud(img: np.ndarray, tick: float) -> None:
         panel_h = 220
         pos_seed = int(tick / 10)
         pos_rng  = random.Random(pos_seed + 999)
+        x_max = max(w * 2 // 3 + 1, 5 * w // 6 - panel_w)
         x_min = w * 2 // 3
-        x_max = max(x_min + 1, w - panel_w - 10)
-        y_min = 35
-        y_max = max(y_min + 1, h - panel_h - 35)
+        y_min = h // 3
+        y_max = max(y_min + 1, 2 * h // 3 - panel_h)
         px = pos_rng.randint(x_min, x_max)
         py = pos_rng.randint(y_min, y_max)
 
@@ -608,10 +608,11 @@ def draw_right_hud(img: np.ndarray, tick: float) -> None:
     # pozice se mění každých 10 s v rámci pravé třetiny obrazu
     pos_seed = int(tick / 10)
     pos_rng  = random.Random(pos_seed + 999)   # jiný seed než levý panel
+    # pravý okraj panelu (px + panel_w) max na 5w/6 (polovina pravé třetiny od kraje)
+    x_max = max(w * 2 // 3 + 1, 5 * w // 6 - panel_w)
     x_min = w * 2 // 3
-    x_max = max(x_min + 1, w - panel_w - 10)
-    y_min = 35
-    y_max = max(y_min + 1, h - panel_h - 35)
+    y_min = h // 3                                      # střední horizontální třetina
+    y_max = max(y_min + 1, 2 * h // 3 - panel_h)
     px = pos_rng.randint(x_min, x_max)
     py = pos_rng.randint(y_min, y_max)
 
@@ -811,9 +812,9 @@ def draw_left_hud(img: np.ndarray, tick: float) -> None:
     pos_seed = int(tick / 10)
     pos_rng  = random.Random(pos_seed)
     x_min = 10
-    x_max = max(x_min + 1, w // 3 - panel_w)
-    y_min = 35
-    y_max = max(y_min + 1, h - panel_h - 35)
+    x_max = max(x_min + 1, w // 6)         # levý okraj max na polovině levé třetiny
+    y_min = h // 3                           # střední horizontální třetina – začátek
+    y_max = max(y_min + 1, 2 * h // 3 - panel_h)   # střední třetina – konec
     px = pos_rng.randint(x_min, x_max)
     py = pos_rng.randint(y_min, y_max)
 
@@ -1179,6 +1180,11 @@ def main():
     _SCAN_INTERVAL = 4.0   # sekundy mezi scan zvuky
     _ALERT_THRESH  = 3     # počet cílů pro alert
 
+    # rotace viditelných objektů
+    _MAX_RENDER      = 3      # maximální počet současně vykreslených detekcí
+    _OBJ_CYCLE_SECS  = 5.0   # sekund mezi přepnutím skupiny objektů
+    _obj_state       = [0.0, 0]   # [last_cycle_tick, offset]
+
     # inicializuj noise pool po prvním přečtení rozlišení
     ret0, frame0 = cap.read()
     if not ret0:
@@ -1274,11 +1280,34 @@ def main():
         filtered = add_noise(filtered, frame_no)
 
         # ---------------------------------------------------------------
+        # Výběr viditelných detekcí (max 4, priority osoby, rotace objektů)
+        # ---------------------------------------------------------------
+        persons    = [(i, d) for i, d in enumerate(cached_detections) if d["label"] == "person"]
+        non_persons = [(i, d) for i, d in enumerate(cached_detections) if d["label"] != "person"]
+
+        person_slots  = min(len(persons), _MAX_RENDER)
+        object_slots  = _MAX_RENDER - person_slots
+
+        if non_persons and tick - _obj_state[0] >= _OBJ_CYCLE_SECS:
+            _obj_state[1] = (_obj_state[1] + object_slots) % max(len(non_persons), 1)
+            _obj_state[0] = tick
+
+        visible_non_persons = []
+        if non_persons and object_slots > 0:
+            for k in range(object_slots):
+                visible_non_persons.append(non_persons[(_obj_state[1] + k) % len(non_persons)])
+
+        visible = persons[:person_slots] + visible_non_persons
+        visible_indices = {i for i, _ in visible}
+
+        # ---------------------------------------------------------------
         # Kresli overlay – pracuj na kopii pro alpha blend
         # ---------------------------------------------------------------
         overlay = filtered.copy()
 
         for i, det in enumerate(cached_detections):
+            if i not in visible_indices:
+                continue
             mask_xy  = det.get("mask_xy")
             mask_bin = cached_masks_bin[i] if i < len(cached_masks_bin) else None
             lbl      = det["label"]
@@ -1298,8 +1327,8 @@ def main():
                     put_text_outlined(overlay, f"SCAN: {zone_name}",
                                       (x2 + 4, zbbox[1] + 10), 0.30, RED_DIM)
 
-        # HUD per-detekce (na overlay)
-        for det in cached_detections:
+        # HUD per-detekce (na overlay) – pouze viditelné
+        for i, det in visible:
             draw_detection(overlay, det, frame.shape, tick, debug=debug_mode)
 
         # zkombinuj overlay s filtrovaným framem (85/15)
