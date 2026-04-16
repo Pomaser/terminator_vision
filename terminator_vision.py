@@ -9,6 +9,18 @@ import random
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
+
+
+def _asset(rel: str) -> str:
+    """Vrátí absolutní cestu k asset souboru.
+    Funguje jak při normálním spuštění, tak po zabalení PyInstaller --onedir.
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    else:
+        base = Path(__file__).parent
+    return str(base / rel)
 
 import cv2
 import numpy as np
@@ -25,7 +37,7 @@ except ImportError:
 # Audio engine
 # ---------------------------------------------------------------------------
 
-_SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
+_SOUNDS_DIR = _asset("sounds")
 
 
 class SoundEngine:
@@ -129,8 +141,7 @@ FONT_MD   = 0.50
 # ---------------------------------------------------------------------------
 # PIL font (Helvetica 73 Extended Bold)
 # ---------------------------------------------------------------------------
-_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "font", "Helvetica73-Extended Bold.ttf")
+_FONT_PATH = _asset(os.path.join("font", "Helvetica73-Extended Bold.ttf"))
 _pil_font_cache: dict = {}
 
 def _get_font(scale: float) -> ImageFont.FreeTypeFont:
@@ -151,8 +162,7 @@ def get_text_width(text: str, scale: float) -> int:
 # ---------------------------------------------------------------------------
 # PIL font – Modern Vision (terminálový typewriter)
 # ---------------------------------------------------------------------------
-_FONT_MV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "font", "modern-vision.ttf")
+_FONT_MV_PATH = _asset(os.path.join("font", "modern-vision.ttf"))
 _FONT_MV_SIZE = 100
 _font_mv: ImageFont.FreeTypeFont | None = None
 
@@ -169,9 +179,7 @@ def _get_font_mv() -> ImageFont.FreeTypeFont:
 # ---------------------------------------------------------------------------
 # Terminálové zprávy – T2 HUD typewriter (střed dolní třetiny)
 # ---------------------------------------------------------------------------
-_TERMINAL_MESSAGES_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "terminal_messages.txt"
-)
+_TERMINAL_MESSAGES_FILE = _asset("terminal_messages.txt")
 _TERMINAL_MESSAGES_FALLBACK: list[str] = [
     "SCANNING", "MATCH FOUND", "SEARCHING", "TARGET ACQUIRED",
     "ANALYZING THREAT", "IDENTIFY", "ACCESSING", "PATTERN MATCH",
@@ -1141,7 +1149,7 @@ def main():
     sound_on = False
 
     # inicializace modelu
-    model = YOLO("yolov8n-seg.pt")
+    model = YOLO(_asset("yolov8n-seg.pt"))
 
     # otevření zdroje videa
     source = args.video if args.video else args.camera

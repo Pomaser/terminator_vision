@@ -28,7 +28,21 @@ python3.14 -c "import ast; ast.parse(open('terminator_vision.py').read()); print
 python3.14 -m pip install opencv-python ultralytics numpy pillow pygame
 ```
 
-Model `yolov8n-seg.pt` se stáhne automaticky při prvním spuštění.
+Model `yolov8n-seg.pt` se stáhne automaticky při prvním spuštění (pokud není přítomen lokálně).
+
+---
+
+## Build pro Windows (PyInstaller)
+
+Sestavit exe lze pouze na Windows (PyInstaller je platform-native):
+
+```bat
+build_windows.bat
+```
+
+Výstup: `dist\TerminatorVision\TerminatorVision.exe`
+
+Cesty k assetům jsou řešeny přes `_asset(rel)` – funguje jak při normálním spuštění, tak jako frozen exe (`sys._MEIPASS`). Vždy používej `_asset()` místo `__file__`-relativních cest.
 
 ---
 
@@ -50,6 +64,8 @@ Model `yolov8n-seg.pt` se stáhne automaticky při prvním spuštění.
 |--------|------|
 | `terminator_vision.py` | Celá aplikace (jediný zdrojový soubor) |
 | `terminal_messages.txt` | Zprávy pro terminálový typewriter, jeden řádek = jedna zpráva, `#` = komentář |
+| `terminator_vision.spec` | PyInstaller spec pro Windows build |
+| `build_windows.bat` | Build skript – spustit na Windows |
 | `font/Helvetica73-Extended Bold.ttf` | Font HUD panelů |
 | `font/modern-vision.ttf` | Font terminálového typewriteru (100 px) |
 | `sounds/*.wav` | Zvuky: startup, ambient, target, new_target, scan, alert |
@@ -76,7 +92,8 @@ overlay = filtered.copy()
     ↓
 [YOLO inference každý 2. frame, výsledky v cached_detections]
     ↓
-Výběr max. 3 viditelných detekcí (priority: osoby, rotace objektů 2 s)
+Filtr velikosti bbox (MAX_BBOX_AREA_RATIO) + výběr max. 3 viditelných detekcí
+(priority: osoby, rotace non-person objektů každých OBJ_CYCLE_SECS)
     ↓
 draw_segmentation_outline + _draw_triangles + put_text_outlined  → overlay
     ↓
@@ -111,7 +128,8 @@ retarget_text(overlay, out)  # volat po addWeighted, před flush_text
 ## Detekce a výběr objektů
 
 - YOLO inference každý **2. frame**, výsledky cachované v `cached_detections`
-- Max. **3 objekty** současně: priority mají osoby, non-person objekty rotují po 2 s
+- **Filtr velikosti:** `MAX_BBOX_AREA_RATIO = 0.40` – bbox větší než 40 % plochy framu se ignoruje (nastavit v `main()`)
+- Max. **3 objekty** současně: priority mají osoby, non-person objekty rotují po `_OBJ_CYCLE_SECS` sekundách
 - Stav rotace: `_obj_state = [last_cycle_tick, offset]` v `main()`
 - Mesh trojúhelníky se přepočítávají každých **0.5 s** a cachují v `mesh_points_cache`
 

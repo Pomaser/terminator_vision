@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# Virtuální prostředí
+.venv/
+venv/
+env/
+
+# YOLO model (stáhne se automaticky)
+*.pt
+*.onnx
+
+# Screenshoty generované aplikací
+terminator_*.png
+
+# PyInstaller výstup
+dist/
+build/
+
+# Video soubory
+sample/*.mp4
+sample/*.mkv
+sample/*.avi
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
